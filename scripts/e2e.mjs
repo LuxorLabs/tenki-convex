@@ -23,7 +23,9 @@ function envLocal() {
   }
 }
 
-const convexUrl = process.env.CONVEX_URL ?? envLocal().CONVEX_URL;
+// The Convex CLI writes VITE_CONVEX_URL when Vite is installed, CONVEX_URL otherwise.
+const convexUrl =
+  process.env.CONVEX_URL ?? envLocal().CONVEX_URL ?? envLocal().VITE_CONVEX_URL;
 assert(convexUrl, "CONVEX_URL is not set");
 // Must match the deployment's CONVEX_CLOUD_URL, which seeds the adoption namespace.
 const namespace = process.env.E2E_NAMESPACE ?? convexUrl;
