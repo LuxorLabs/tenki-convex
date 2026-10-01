@@ -1,8 +1,10 @@
 import {
   TenkiSandbox,
   type CreateOptions,
+  type CreateSnapshotOptions,
   type ListOptions,
   type Session,
+  type Snapshot,
 } from "@tenkicloud/sandbox";
 import type { GenericActionCtx, GenericDataModel } from "convex/server";
 import { ConvexError } from "convex/values";
@@ -13,13 +15,21 @@ import {
   describeError,
   isGone,
   isLive,
+  KILL_SCRIPT,
+  newProcessId,
+  parseStatus,
   phaseFromState,
+  requireProcessId,
+  SPAWN_SCRIPT,
+  STATUS_SCRIPT,
   summarize,
   toArgv,
   truncateUtf8,
+  type Phase,
+  type ProcessState,
 } from "./internal.js";
 
-export type { Phase, RemoteSummary } from "./internal.js";
+export type { Phase, ProcessState, RemoteSummary } from "./internal.js";
 
 export type SandboxSession = Pick<
   Session,
@@ -33,6 +43,15 @@ export type SandboxSession = Pick<
   | "exec"
   | "close"
   | "waitReady"
+  | "pause"
+  | "pauseAsync"
+  | "waitPaused"
+  | "resume"
+  | "waitResumed"
+  | "extend"
+  | "readFile"
+  | "writeFile"
+  | "exposePort"
 >;
 
 /** The `@tenkicloud/sandbox` calls this package makes; inject a fake in tests. */
@@ -40,6 +59,10 @@ export interface SandboxClient {
   create(options: CreateOptions): Promise<SandboxSession>;
   get(sessionId: string): Promise<SandboxSession>;
   list(options: ListOptions): Promise<SandboxSession[]>;
+  createSnapshotAndWait(
+    sessionId: string,
+    options?: CreateSnapshotOptions,
+  ): Promise<Pick<Snapshot, "id">>;
 }
 
 export interface TenkiOptions {
@@ -92,12 +115,26 @@ export interface ExecResult {
   durationMs: number;
 }
 
+export interface ProcessStatus {
+  state: ProcessState;
+  exitCode?: number;
+  signal?: string;
+  /** The last `tailBytes` of combined stdout and stderr. */
+  output: string;
+  outputTruncated: boolean;
+}
+
+export type Signal = "TERM" | "KILL" | "INT" | "HUP";
+
 export const MAX_EXEC_TIMEOUT_MS = 9 * 60_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 1 << 20;
+const DEFAULT_TAIL_BYTES = 64 << 10;
 const CREATE_LEASE_MS = 5 * 60_000;
 const WAIT_FOR_PEER_MS = 3 * 60_000;
 const WAIT_POLL_MS = 1_000;
+const RESUME_READY_MS = 60_000;
 const SESSION_CACHE_LIMIT = 64;
+const SIGNALS: readonly Signal[] = ["TERM", "KILL", "INT", "HUP"];
 
 // Action instances are reused while warm; a cached handle skips ~800ms of data-plane setup.
 const sessionCache = new Map<string, SandboxSession>();
@@ -141,7 +178,7 @@ export class Tenki {
     ctx: ActionCtx,
     args: Identity & { options?: CreateSandboxOptions },
   ) {
-    const identity = { ownerId: args.ownerId, key: args.key };
+    const identity = pick(args);
     const token = crypto.randomUUID();
     const { claimed, sandbox } = await ctx.runMutation(
       this.component.sandboxes.claim,
@@ -204,57 +241,22 @@ export class Tenki {
 
   /** Re-reads the session from Tenki and updates the row. */
   async refresh(ctx: ActionCtx, args: Identity) {
-    const identity = { ownerId: args.ownerId, key: args.key };
+    const identity = pick(args);
     const sandbox = await this.get(ctx, identity);
     if (!sandbox?.sessionId) return sandbox;
-    const sessionId = sandbox.sessionId;
-    try {
-      const session = await this.client().get(sessionId);
-      cacheSession(session);
-      return await ctx.runMutation(this.component.sandboxes.sync, {
-        ...identity,
-        sessionId,
-        phase: phaseFromState(session.state),
-        remote: summarize(session),
-      });
-    } catch (err) {
-      if (!isGone(err)) throw toConvexError(err);
-      sessionCache.delete(sessionId);
-      return await ctx.runMutation(this.component.sandboxes.sync, {
-        ...identity,
-        sessionId,
-        phase: "terminated",
-      });
-    }
+    return await this.syncFromRemote(ctx, identity, sandbox.sessionId);
   }
 
   async exec(
     ctx: ActionCtx,
     args: Identity & ExecOptions,
   ): Promise<ExecResult> {
-    const identity = { ownerId: args.ownerId, key: args.key };
-    const sandbox = await this.get(ctx, identity);
-    if (!sandbox?.sessionId) {
-      throw new ConvexError({
-        code: "not_found",
-        message: `no sandbox for key "${args.key}"`,
-      });
-    }
-    if (sandbox.phase !== "ready") {
-      throw new ConvexError({
-        code: "not_ready",
-        message: `sandbox is ${sandbox.phase}`,
-        phase: sandbox.phase,
-      });
-    }
-    const sessionId = sandbox.sessionId;
     const timeoutMs = Math.min(
       args.timeoutMs ?? MAX_EXEC_TIMEOUT_MS,
       MAX_EXEC_TIMEOUT_MS,
     );
     const maxOutputBytes = args.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
-    try {
-      const session = await this.session(sessionId);
+    return await this.withSession(ctx, args, async (session) => {
       const r = await session.exec(toArgv(args.command), {
         cwd: args.cwd,
         env: args.env,
@@ -272,22 +274,263 @@ export class Tenki {
         ...(r.reason ? { reason: r.reason } : {}),
         durationMs: r.durationMs,
       };
-    } catch (err) {
-      sessionCache.delete(sessionId);
-      if (isGone(err)) {
+    });
+  }
+
+  /**
+   * Starts a command in the background and returns at once. It keeps running
+   * after this action ends and across pause/resume; poll it with `processStatus`.
+   */
+  async spawn(
+    ctx: ActionCtx,
+    args: Identity & {
+      command: string;
+      cwd?: string;
+      env?: Record<string, string>;
+    },
+  ): Promise<{ processId: string; pid: number }> {
+    const processId = newProcessId();
+    return await this.withSession(ctx, args, async (session) => {
+      const r = await session.exec(["bash", "-c", SPAWN_SCRIPT], {
+        cwd: args.cwd,
+        env: {
+          ...args.env,
+          TENKI_CVX_ID: processId,
+          TENKI_CVX_CMD: args.command,
+        },
+        timeoutMs: 30_000,
+      });
+      if (r.exitCode !== 0) {
+        throw new ConvexError({
+          code: "spawn_failed",
+          message: new TextDecoder().decode(r.stderr).trim(),
+        });
+      }
+      return {
+        processId,
+        pid: Number(new TextDecoder().decode(r.stdout).trim()),
+      };
+    });
+  }
+
+  async processStatus(
+    ctx: ActionCtx,
+    args: Identity & { processId: string; tailBytes?: number },
+  ): Promise<ProcessStatus> {
+    requireProcessId(args.processId);
+    const tailBytes = Math.max(
+      0,
+      Math.floor(args.tailBytes ?? DEFAULT_TAIL_BYTES),
+    );
+    return await this.withSession(ctx, args, async (session) => {
+      const r = await session.exec(["bash", "-c", STATUS_SCRIPT], {
+        env: {
+          TENKI_CVX_ID: args.processId,
+          TENKI_CVX_TAIL: String(tailBytes),
+        },
+        timeoutMs: 30_000,
+      });
+      return parseStatus(new TextDecoder().decode(r.stdout), tailBytes);
+    });
+  }
+
+  /** Signals the process and everything it started. */
+  async kill(
+    ctx: ActionCtx,
+    args: Identity & { processId: string; signal?: Signal },
+  ): Promise<{ signaled: boolean }> {
+    requireProcessId(args.processId);
+    const signal = args.signal ?? "TERM";
+    if (!SIGNALS.includes(signal))
+      throw new ConvexError({
+        code: "invalid_argument",
+        message: `bad signal ${signal}`,
+      });
+    return await this.withSession(ctx, args, async (session) => {
+      const r = await session.exec(["bash", "-c", KILL_SCRIPT], {
+        env: { TENKI_CVX_ID: args.processId, TENKI_CVX_SIGNAL: signal },
+        timeoutMs: 30_000,
+      });
+      return {
+        signaled: new TextDecoder().decode(r.stdout).trim() === "signaled",
+      };
+    });
+  }
+
+  async readFile(
+    ctx: ActionCtx,
+    args: Identity & { path: string },
+  ): Promise<string>;
+  async readFile(
+    ctx: ActionCtx,
+    args: Identity & { path: string; encoding: "bytes" },
+  ): Promise<ArrayBuffer>;
+  async readFile(
+    ctx: ActionCtx,
+    args: Identity & { path: string; encoding?: "utf8" | "bytes" },
+  ): Promise<string | ArrayBuffer> {
+    return await this.withSession(ctx, args, async (session) => {
+      const bytes = await session.readFile(args.path);
+      if (args.encoding === "bytes") return bytes.slice().buffer;
+      return new TextDecoder().decode(bytes);
+    });
+  }
+
+  async writeFile(
+    ctx: ActionCtx,
+    args: Identity & { path: string; data: string | ArrayBuffer },
+  ): Promise<void> {
+    const data =
+      typeof args.data === "string" ? args.data : new Uint8Array(args.data);
+    await this.withSession(
+      ctx,
+      args,
+      async (session) => await session.writeFile(args.path, data),
+    );
+  }
+
+  /** Returns a public URL for a port and records it on the row. */
+  async exposePort(
+    ctx: ActionCtx,
+    args: Identity & { port: number; ttlMs?: number; slug?: string },
+  ) {
+    return await this.withSession(ctx, args, async (session, sandbox) => {
+      const exposed = await session.exposePort(args.port, {
+        ttlMs: args.ttlMs,
+        slug: args.slug,
+      });
+      const preview = {
+        port: exposed.port,
+        url: exposed.previewUrl,
+        ...(exposed.expiresAt
+          ? { expiresAt: exposed.expiresAt.getTime() }
+          : {}),
+      };
+      await ctx.runMutation(this.component.sandboxes.setPreview, {
+        ...pick(args),
+        sessionId: sandbox.sessionId!,
+        preview,
+      });
+      return preview;
+    });
+  }
+
+  async extend(ctx: ActionCtx, args: Identity & { additionalMs: number }) {
+    return await this.withSession(ctx, args, async (session, sandbox) => {
+      await session.extend(args.additionalMs);
+      return await ctx.runMutation(this.component.sandboxes.sync, {
+        ...pick(args),
+        sessionId: sandbox.sessionId!,
+        phase: phaseFromState(session.state),
+        remote: summarize(session),
+      });
+    });
+  }
+
+  /**
+   * Pauses the sandbox, keeping memory and disk. Takes tens of seconds; with
+   * `wait: false` it returns `pausing` and a later `refresh` sees `paused`.
+   */
+  async pause(ctx: ActionCtx, args: Identity & { wait?: boolean }) {
+    const identity = pick(args);
+    return await this.withSession(ctx, args, async (session, sandbox) => {
+      const sessionId = sandbox.sessionId!;
+      await ctx.runMutation(this.component.sandboxes.sync, {
+        ...identity,
+        sessionId,
+        phase: "pausing",
+      });
+      if (args.wait === false) {
+        await session.pauseAsync();
+      } else {
+        // PauseSession can return while the session is still PAUSING.
+        await session.pause();
+        await session.waitPaused();
+      }
+      return await this.syncFromRemote(ctx, identity, sessionId);
+    });
+  }
+
+  /** Resumes a paused sandbox and returns once commands run again. */
+  async resume(ctx: ActionCtx, args: Identity) {
+    const identity = pick(args);
+    return await this.withSession(
+      ctx,
+      args,
+      async (session, sandbox) => {
+        const sessionId = sandbox.sessionId!;
         await ctx.runMutation(this.component.sandboxes.sync, {
           ...identity,
           sessionId,
-          phase: "terminated",
+          phase: "resuming",
         });
-      }
-      throw toConvexError(err);
-    }
+        await session.resume();
+        await session.waitResumed();
+        await waitForExec(session, RESUME_READY_MS);
+        return await ctx.runMutation(this.component.sandboxes.sync, {
+          ...identity,
+          sessionId,
+          phase: "ready",
+          remote: summarize(session),
+        });
+      },
+      ["paused", "pausing", "resuming", "ready"],
+    );
+  }
+
+  /** Captures the sandbox's disk and memory; restore it with `create({ options: { snapshotId } })` or `fork`. */
+  async snapshot(
+    ctx: ActionCtx,
+    args: Identity & { name?: string; expiresAt?: Date },
+  ) {
+    return await this.withSession(
+      ctx,
+      args,
+      async (_session, sandbox) => {
+        const snap = await this.client().createSnapshotAndWait(
+          sandbox.sessionId!,
+          {
+            name: args.name,
+            expiresAt: args.expiresAt,
+          },
+        );
+        return await ctx.runMutation(this.component.sandboxes.recordSnapshot, {
+          ...pick(args),
+          sessionId: sandbox.sessionId!,
+          snapshotId: snap.id,
+          ...(args.name ? { name: args.name } : {}),
+        });
+      },
+      ["ready", "paused"],
+    );
+  }
+
+  /** Snapshots `from` and creates `to` from it. Both sandboxes keep running independently. */
+  async fork(
+    ctx: ActionCtx,
+    args: {
+      ownerId: string;
+      from: string;
+      to: string;
+      name?: string;
+      options?: CreateSandboxOptions;
+    },
+  ) {
+    const snap = await this.snapshot(ctx, {
+      ownerId: args.ownerId,
+      key: args.from,
+      name: args.name,
+    });
+    return await this.create(ctx, {
+      ownerId: args.ownerId,
+      key: args.to,
+      options: { ...args.options, snapshotId: snap.snapshotId },
+    });
   }
 
   /** Terminates the sandbox, including any orphan a crashed `create` left behind. */
   async destroy(ctx: ActionCtx, args: Identity) {
-    const identity = { ownerId: args.ownerId, key: args.key };
+    const identity = pick(args);
     const sdk = this.client();
     const sandbox = await this.get(ctx, identity);
     const tagged = (
@@ -310,6 +553,104 @@ export class Tenki {
       sessionId: sandbox.sessionId,
       phase: "terminated",
     });
+  }
+
+  /**
+   * Refreshes the least recently updated live sandboxes across all owners, so
+   * rows catch up with sandboxes that timed out. Run it from a cron.
+   */
+  async reconcile(ctx: ActionCtx, args: { limit?: number } = {}) {
+    const rows = await ctx.runQuery(this.component.sandboxes.stale, {
+      limit: args.limit ?? 50,
+    });
+    let changed = 0;
+    for (const row of rows) {
+      try {
+        const after = await this.syncFromRemote(ctx, pick(row), row.sessionId!);
+        if (after?.phase !== row.phase) changed++;
+      } catch {
+        // Leave the row for the next run.
+      }
+    }
+    return { checked: rows.length, changed };
+  }
+
+  async listSnapshots(ctx: ActionCtx, args: Identity & { limit?: number }) {
+    return await ctx.runQuery(this.component.sandboxes.listSnapshots, {
+      ...pick(args),
+      limit: args.limit,
+    });
+  }
+
+  /**
+   * Runs `fn` against the row's live session. A session Tenki no longer has
+   * marks the row terminated; a state conflict re-syncs it from Tenki.
+   */
+  private async withSession<T>(
+    ctx: ActionCtx,
+    args: Identity,
+    fn: (
+      session: SandboxSession,
+      sandbox: { sessionId?: string; phase: Phase },
+    ) => Promise<T>,
+    allowed: readonly Phase[] = ["ready"],
+  ): Promise<T> {
+    const identity = pick(args);
+    const sandbox = await this.get(ctx, identity);
+    if (!sandbox?.sessionId) {
+      throw new ConvexError({
+        code: "not_found",
+        message: `no sandbox for key "${identity.key}"`,
+      });
+    }
+    if (!allowed.includes(sandbox.phase)) {
+      throw new ConvexError({
+        code: "not_ready",
+        message: `sandbox is ${sandbox.phase}`,
+        phase: sandbox.phase,
+      });
+    }
+    const sessionId = sandbox.sessionId;
+    try {
+      return await fn(await this.session(sessionId), sandbox);
+    } catch (err) {
+      sessionCache.delete(sessionId);
+      if (isGone(err)) {
+        await ctx.runMutation(this.component.sandboxes.sync, {
+          ...identity,
+          sessionId,
+          phase: "terminated",
+        });
+      } else if (describeError(err).code === "invalid_state") {
+        await this.syncFromRemote(ctx, identity, sessionId).catch(() => {});
+      }
+      throw toConvexError(err);
+    }
+  }
+
+  private async syncFromRemote(
+    ctx: ActionCtx,
+    identity: Identity,
+    sessionId: string,
+  ) {
+    try {
+      const session = await this.client().get(sessionId);
+      cacheSession(session);
+      return await ctx.runMutation(this.component.sandboxes.sync, {
+        ...identity,
+        sessionId,
+        phase: phaseFromState(session.state),
+        remote: summarize(session),
+      });
+    } catch (err) {
+      if (!isGone(err)) throw toConvexError(err);
+      sessionCache.delete(sessionId);
+      return await ctx.runMutation(this.component.sandboxes.sync, {
+        ...identity,
+        sessionId,
+        phase: "terminated",
+      });
+    }
   }
 
   private client(): SandboxClient {
@@ -367,9 +708,36 @@ export class Tenki {
       const sandbox = await this.get(ctx, identity);
       if (!sandbox || sandbox.phase !== "provisioning" || Date.now() > deadline)
         return sandbox!;
-      await new Promise((resolve) => setTimeout(resolve, WAIT_POLL_MS));
+      await sleep(WAIT_POLL_MS);
     }
   }
+}
+
+// Resume can report success before the guest agent answers again.
+async function waitForExec(session: SandboxSession, timeoutMs: number) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      const r = await session.exec(["true"], { timeoutMs: 10_000 });
+      if (r.exitCode === 0) return;
+    } catch (err) {
+      if (isGone(err) || Date.now() > deadline) throw err;
+    }
+    if (Date.now() > deadline)
+      throw new ConvexError({
+        code: "resume_failed",
+        message: "sandbox did not answer after resume",
+      });
+    await sleep(1_000);
+  }
+}
+
+function pick(args: Identity): Identity {
+  return { ownerId: args.ownerId, key: args.key };
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function cacheSession(session: SandboxSession) {

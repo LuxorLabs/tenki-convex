@@ -26,6 +26,12 @@ export const errorValidator = v.object({
   at: v.number(),
 });
 
+export const previewValidator = v.object({
+  port: v.number(),
+  url: v.string(),
+  expiresAt: v.optional(v.number()),
+});
+
 export default defineSchema({
   sandboxes: defineTable({
     ownerId: v.string(),
@@ -35,9 +41,17 @@ export default defineSchema({
     // Creation lease: only the holder calls CreateSession for this (ownerId, key).
     claim: v.optional(v.object({ token: v.string(), expiresAt: v.number() })),
     remote: v.optional(remoteValidator),
+    previews: v.optional(v.array(previewValidator)),
     lastError: v.optional(errorValidator),
     updatedAt: v.number(),
   })
     .index("by_owner_key", ["ownerId", "key"])
-    .index("by_session", ["sessionId"]),
+    .index("by_phase_updated", ["phase", "updatedAt"]),
+  snapshots: defineTable({
+    ownerId: v.string(),
+    key: v.string(),
+    sessionId: v.string(),
+    snapshotId: v.string(),
+    name: v.optional(v.string()),
+  }).index("by_owner_key", ["ownerId", "key"]),
 });

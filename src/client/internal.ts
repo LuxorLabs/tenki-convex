@@ -111,6 +111,13 @@ const ERROR_CODES: Record<string, string> = {
   SessionNotFoundError: "not_found",
   SessionTerminatedError: "terminated",
   SessionExpiredError: "terminated",
+  InvalidStateError: "invalid_state",
+  FileNotFoundError: "file_not_found",
+  SnapshotFailedError: "snapshot_failed",
+  SnapshotWaitTimeoutError: "snapshot_failed",
+  ResumeFailedError: "resume_failed",
+  PortLimitExceededError: "port_limit_exceeded",
+  InboundDisabledError: "inbound_disabled",
 };
 
 export function describeError(err: unknown): { code: string; message: string } {
@@ -123,4 +130,61 @@ export function describeError(err: unknown): { code: string; message: string } {
 export function isGone(err: unknown): boolean {
   const code = describeError(err).code;
   return code === "not_found" || code === "terminated";
+}
+
+// Background processes outlive the exec that starts them; their state lives under
+// $HOME because a pause wipes /tmp. Inputs arrive via env, never interpolated.
+const PROC_ROOT = '"$HOME/.tenki-convex/proc/$TENKI_CVX_ID"';
+
+export const SPAWN_SCRIPT = `set -e
+D=${PROC_ROOT}
+mkdir -p "$D"
+export TENKI_CVX_DIR="$D"
+setsid nohup bash -c 'cmd=$TENKI_CVX_CMD; dir=$TENKI_CVX_DIR; unset TENKI_CVX_CMD TENKI_CVX_DIR TENKI_CVX_ID; bash -lc "$cmd"; echo $? > "$dir/exit"' > "$D/log" 2>&1 < /dev/null &
+echo $! > "$D/pid"
+echo $!`;
+
+export const STATUS_SCRIPT = `D=${PROC_ROOT}
+[ -d "$D" ] || { echo missing; exit 0; }
+size=$(wc -c < "$D/log" | tr -d ' ')
+if [ -f "$D/exit" ]; then echo "exited $(cat "$D/exit") $size"
+elif kill -0 "$(cat "$D/pid")" 2>/dev/null; then echo "running - $size"
+elif [ -f "$D/signal" ]; then echo "killed $(cat "$D/signal") $size"
+else echo "lost - $size"; fi
+tail -c "$TENKI_CVX_TAIL" "$D/log"`;
+
+export const KILL_SCRIPT = `D=${PROC_ROOT}
+[ -f "$D/pid" ] || { echo missing; exit 0; }
+if kill -s "$TENKI_CVX_SIGNAL" -- "-$(cat "$D/pid")" 2>/dev/null; then
+  echo "$TENKI_CVX_SIGNAL" > "$D/signal"; echo signaled
+else echo gone; fi`;
+
+/** `lost`: ended without recording an exit, e.g. the sandbox restarted. */
+export type ProcessState = "running" | "exited" | "killed" | "lost" | "missing";
+
+export function parseStatus(stdout: string, tailBytes: number) {
+  const newline = stdout.indexOf("\n");
+  const head = newline === -1 ? stdout : stdout.slice(0, newline);
+  const [state, exit, size] = head.trim().split(" ");
+  if (state === "missing")
+    return { state: "missing" as const, output: "", outputTruncated: false };
+  const output = newline === -1 ? "" : stdout.slice(newline + 1);
+  return {
+    state: state as ProcessState,
+    ...(state === "exited" ? { exitCode: Number(exit) } : {}),
+    ...(state === "killed" ? { signal: exit } : {}),
+    output,
+    outputTruncated: Number(size) > tailBytes,
+  };
+}
+
+const PROCESS_ID = /^[a-z0-9]{8,32}$/;
+
+export function requireProcessId(processId: string) {
+  if (!PROCESS_ID.test(processId))
+    throw new Error(`invalid processId "${processId}"`);
+}
+
+export function newProcessId(): string {
+  return crypto.randomUUID().replaceAll("-", "").slice(0, 16);
 }

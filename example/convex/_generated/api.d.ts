@@ -8,6 +8,7 @@
  * @module
  */
 
+import type * as crons from "../crons.js";
 import type * as workspace from "../workspace.js";
 import type * as workspaceActions from "../workspaceActions.js";
 
@@ -18,6 +19,7 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  crons: typeof crons;
   workspace: typeof workspace;
   workspaceActions: typeof workspaceActions;
 }>;

@@ -1,38 +1,54 @@
 import { test } from "vitest";
-import type { CreateOptions, ListOptions } from "@tenkicloud/sandbox";
+import type {
+  CreateOptions,
+  CreateSnapshotOptions,
+  ListOptions,
+} from "@tenkicloud/sandbox";
 import type { SandboxClient, SandboxSession } from "./index.js";
 
 export type FakeSession = SandboxSession & {
   tags: string[];
   metadata: Record<string, string>;
   argv: string[][];
+  files: Map<string, Uint8Array>;
+};
+
+type ExecReply = {
+  exitCode: number;
+  stdout: Uint8Array;
+  stderr: Uint8Array;
+  reason?: string;
+  durationMs: number;
+};
+type ExecOptions = {
+  cwd?: string;
+  env?: Record<string, string>;
+  timeoutMs?: number;
 };
 
 export function sdkError(name: string, message = name): Error {
   return Object.assign(new Error(message), { name });
 }
 
+export const text = (s: string) => new TextEncoder().encode(s);
+
 /** In-memory stand-in for the Tenki control plane. */
 export class FakeSdk implements SandboxClient {
   sessions = new Map<string, FakeSession>();
   creates: CreateOptions[] = [];
+  snapshots: { sessionId: string; options?: CreateSnapshotOptions }[] = [];
   createDelayMs = 0;
   failCreate?: Error;
-  execResult: {
-    exitCode: number;
-    stdout: Uint8Array;
-    stderr: Uint8Array;
-    reason?: string;
-    durationMs: number;
-  } = {
+  execResult: ExecReply = {
     exitCode: 0,
-    stdout: new TextEncoder().encode("ok\n"),
+    stdout: text("ok\n"),
     stderr: new Uint8Array(),
     reason: "exit",
     durationMs: 5,
   };
   execError?: Error;
-  execOptions: unknown[] = [];
+  onExec?: (argv: string[], options: ExecOptions) => ExecReply | Error;
+  execOptions: ExecOptions[] = [];
   private static seq = 100;
 
   seed(tags: string[], state = "RUNNING", id = this.nextId()): FakeSession {
@@ -74,15 +90,21 @@ export class FakeSdk implements SandboxClient {
     );
   }
 
+  async createSnapshotAndWait(
+    sessionId: string,
+    options?: CreateSnapshotOptions,
+  ) {
+    this.snapshots.push({ sessionId, options });
+    return { id: `snap-${this.snapshots.length}` };
+  }
+
   private make(
     id: string,
     tags: string[],
     metadata: Record<string, string>,
     state: string,
   ): FakeSession {
-    const execResult = () => this.execResult;
-    const execError = () => this.execError;
-    const execOptions = this.execOptions;
+    const sdk = () => this;
     const session: FakeSession = {
       id,
       state: state as SandboxSession["state"],
@@ -94,16 +116,19 @@ export class FakeSdk implements SandboxClient {
       tags,
       metadata,
       argv: [],
+      files: new Map(),
       async exec(command, options) {
-        session.argv.push(command as string[]);
-        execOptions.push(options);
-        const error = execError();
-        if (error) throw error;
+        const argv = command as string[];
+        session.argv.push(argv);
+        sdk().execOptions.push(options ?? {});
+        if (sdk().execError) throw sdk().execError;
+        const reply = sdk().onExec?.(argv, options ?? {}) ?? sdk().execResult;
+        if (reply instanceof Error) throw reply;
         return {
-          ...execResult(),
+          ...reply,
           sessionId: id,
-          command: "",
-          args: [],
+          command: argv[0],
+          args: argv.slice(1),
           status: "COMPLETED",
           outputs: [],
         } as never;
@@ -113,6 +138,44 @@ export class FakeSdk implements SandboxClient {
       },
       async waitReady() {
         session.state = "RUNNING";
+      },
+      async pause() {
+        session.state = "PAUSING";
+      },
+      async waitPaused() {
+        session.state = "PAUSED";
+      },
+      async pauseAsync() {
+        session.state = "PAUSING";
+      },
+      async resume() {
+        session.state = "RESUMING";
+      },
+      async waitResumed() {
+        session.state = "RUNNING";
+      },
+      async extend(ms) {
+        session.timeoutAt = new Date(session.timeoutAt.getTime() + ms);
+      },
+      async readFile(path) {
+        const data = session.files.get(path);
+        if (!data) throw sdkError("FileNotFoundError", path);
+        return data;
+      },
+      async writeFile(path, data) {
+        session.files.set(path, typeof data === "string" ? text(data) : data);
+      },
+      async exposePort(port, options) {
+        return {
+          port,
+          previewUrl: `https://${options?.slug ?? "p"}-${port}.preview.test`,
+          expiresAt: options?.ttlMs
+            ? new Date(Date.now() + options.ttlMs)
+            : undefined,
+          wildcard: false,
+          wildcardStatus: "UNSPECIFIED",
+          wildcardStatusReason: "",
+        };
       },
     };
     return session;

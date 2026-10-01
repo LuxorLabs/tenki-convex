@@ -94,23 +94,57 @@ export const mine = query({
 
 ### API
 
-| Method                                                       | What it does                                                                                                                                                                  |
-| ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `create(ctx, {ownerId, key, options?})`                      | Returns the sandbox for the identity, creating it if needed. `options` takes any `@tenkicloud/sandbox` create option (resources, image, template, env, `maxDurationMs`, ...). |
-| `exec(ctx, {ownerId, key, command, cwd?, env?, timeoutMs?})` | Runs a command. A string runs under `bash -lc`; an array runs as argv. Output is capped at 1 MiB per stream; timeouts at 9 minutes.                                           |
-| `refresh(ctx, {ownerId, key})`                               | Re-reads the sandbox from Tenki, for example after it timed out or paused.                                                                                                    |
-| `destroy(ctx, {ownerId, key})`                               | Terminates the sandbox. The key can then be reused.                                                                                                                           |
-| `get` / `list`                                               | Read rows from an action. In queries, use `components.tenki.sandboxes.get` / `.list`.                                                                                         |
+Every method takes the action `ctx` and the sandbox's `{ ownerId, key }`.
 
-Errors are `ConvexError`s with a `code`: `not_found`, `not_ready`, `terminated`,
-`unauthenticated`, `quota_exceeded`, `rate_limited`, ...
+**Lifecycle**
+
+- `create({ options? })` returns the sandbox, creating it if needed. `options`
+  takes any `@tenkicloud/sandbox` create option: resources, image, template,
+  env, `maxDurationMs`, `snapshotId`, ...
+- `pause({ wait? })` keeps memory and disk; it takes tens of seconds. With
+  `wait: false` it returns `pausing`, and a later `refresh` sees `paused`.
+- `resume()` returns once commands run again.
+- `extend({ additionalMs })` pushes the deadline out.
+- `snapshot({ name? })` captures the sandbox; `listSnapshots()` lists them.
+- `fork({ ownerId, from, to })` snapshots `from` and creates `to` from it.
+- `refresh()` re-reads the sandbox from Tenki.
+- `destroy()` terminates it. The key can then be reused.
+- `reconcile({ limit? })` refreshes the least recently updated live sandboxes
+  across all owners. Run it from a cron (see `example/convex/crons.ts`) so rows
+  catch up with sandboxes that reached their deadline.
+
+**Commands and files**
+
+- `exec({ command, cwd?, env?, timeoutMs? })` runs a command and waits. A string
+  runs under `bash -lc`; an array runs as argv. Output is capped at 1 MiB per
+  stream and the timeout at 9 minutes, inside Convex's action limit.
+- `spawn({ command, cwd?, env? })` starts a background command and returns a
+  `processId` at once. It keeps running after the action ends and across
+  pause/resume.
+- `processStatus({ processId, tailBytes? })` returns `running`, `exited` (with
+  `exitCode`), `killed`, or `lost` (ended without an exit, e.g. the sandbox
+  restarted), plus the tail of its output.
+- `kill({ processId, signal? })` signals the process and its children.
+- `readFile({ path, encoding? })` returns a string, or an `ArrayBuffer` with
+  `encoding: "bytes"`. `writeFile({ path, data })` takes either.
+- `exposePort({ port, ttlMs?, slug? })` returns a public URL and records it in
+  the row's `previews`.
+
+**Reads**
+
+- `get()` / `list({ ownerId })` from an action. In queries, use
+  `components.tenki.sandboxes.get` / `.list` directly.
+
+Errors are `ConvexError`s with a `code`, such as `not_found`, `not_ready` (the
+row's `phase` doesn't allow the call), `terminated`, `invalid_state`,
+`file_not_found`, `unauthenticated`, `quota_exceeded` or `rate_limited`.
 
 ### Lifetime
 
 A Tenki sandbox has an absolute lifetime, set with `maxDurationMs` at create
 time. Your workspace's limits set the default and the maximum. Activity does not
-extend it. When it ends, the row keeps its last known phase until you call
-`refresh`.
+extend it; call `extend`. When it ends, the row keeps its last known phase until
+`refresh` or `reconcile` runs.
 
 ## Development
 

@@ -1,6 +1,10 @@
 import { v } from "convex/values";
 import { mutation, query, type QueryCtx } from "./_generated/server.js";
-import schema, { phaseValidator, remoteValidator } from "./schema.js";
+import schema, {
+  phaseValidator,
+  previewValidator,
+  remoteValidator,
+} from "./schema.js";
 
 export const sandboxValidator = schema.tables.sandboxes.validator.extend({
   _id: v.id("sandboxes"),
@@ -74,6 +78,7 @@ export const claim = mutation({
       claim: lease,
       sessionId: undefined,
       remote: undefined,
+      previews: undefined,
       lastError: undefined,
       updatedAt: now,
     });
@@ -157,5 +162,86 @@ export const sync = mutation({
       updatedAt: Date.now(),
     });
     return (await ctx.db.get("sandboxes", existing._id))!;
+  },
+});
+
+/** Records a preview URL, replacing any earlier one for the same port. */
+export const setPreview = mutation({
+  args: { ...identity, sessionId: v.string(), preview: previewValidator },
+  returns: v.union(sandboxValidator, v.null()),
+  handler: async (ctx, args) => {
+    const existing = await find(ctx, args.ownerId, args.key);
+    if (!existing || existing.sessionId !== args.sessionId) return existing;
+    const previews = (existing.previews ?? []).filter(
+      (p) => p.port !== args.preview.port,
+    );
+    await ctx.db.patch("sandboxes", existing._id, {
+      previews: [...previews, args.preview].sort((a, b) => a.port - b.port),
+      updatedAt: Date.now(),
+    });
+    return (await ctx.db.get("sandboxes", existing._id))!;
+  },
+});
+
+const LIVE_PHASES = [
+  "ready",
+  "pausing",
+  "paused",
+  "resuming",
+  "provisioning",
+] as const;
+
+/** Least recently updated live rows across all owners, for periodic reconciliation. */
+export const stale = query({
+  args: { limit: v.number() },
+  returns: v.array(sandboxValidator),
+  handler: async (ctx, args) => {
+    const perPhase = await Promise.all(
+      LIVE_PHASES.map((phase) =>
+        ctx.db
+          .query("sandboxes")
+          .withIndex("by_phase_updated", (q) => q.eq("phase", phase))
+          .take(args.limit),
+      ),
+    );
+    return perPhase
+      .flat()
+      .filter((row) => row.sessionId)
+      .sort((a, b) => a.updatedAt - b.updatedAt)
+      .slice(0, args.limit);
+  },
+});
+
+export const snapshotValidator = schema.tables.snapshots.validator.extend({
+  _id: v.id("snapshots"),
+  _creationTime: v.number(),
+});
+
+export const recordSnapshot = mutation({
+  args: {
+    ...identity,
+    sessionId: v.string(),
+    snapshotId: v.string(),
+    name: v.optional(v.string()),
+  },
+  returns: snapshotValidator,
+  handler: async (ctx, args) => {
+    const id = await ctx.db.insert("snapshots", args);
+    return (await ctx.db.get("snapshots", id))!;
+  },
+});
+
+export const listSnapshots = query({
+  args: { ...identity, limit: v.optional(v.number()) },
+  returns: v.array(snapshotValidator),
+  handler: async (ctx, args) => {
+    const limit = Math.max(1, Math.min(Math.floor(args.limit ?? 100), 500));
+    return await ctx.db
+      .query("snapshots")
+      .withIndex("by_owner_key", (q) =>
+        q.eq("ownerId", args.ownerId).eq("key", args.key),
+      )
+      .order("desc")
+      .take(limit);
   },
 });

@@ -3,8 +3,8 @@ import { anyApi, actionGeneric, type ApiFromModules } from "convex/server";
 import { ConvexError, v } from "convex/values";
 import { beforeEach, describe, expect, test } from "vitest";
 import { MAX_EXEC_TIMEOUT_MS, Tenki } from "./index.js";
-import { adoptionTag } from "./internal.js";
-import { FakeSdk, sdkError } from "./fake.test.js";
+import { adoptionTag, SPAWN_SCRIPT } from "./internal.js";
+import { FakeSdk, sdkError, text } from "./fake.test.js";
 import { components, initConvexTest } from "./setup.test.js";
 
 let fake = new FakeSdk();
@@ -44,6 +44,17 @@ export const destroy = actionGeneric({
     await tenki(namespace).destroy(ctx, args),
 });
 
+export const op = actionGeneric({
+  args: { method: v.string(), args: v.any() },
+  handler: async (ctx, { method, args }) => {
+    const client = tenki() as unknown as Record<
+      string,
+      (ctx: unknown, args: unknown) => Promise<unknown>
+    >;
+    return await client[method](ctx, args);
+  },
+});
+
 const api = (
   anyApi as unknown as ApiFromModules<{
     "index.test": {
@@ -51,6 +62,7 @@ const api = (
       exec: typeof exec;
       refresh: typeof refresh;
       destroy: typeof destroy;
+      op: typeof op;
     };
   }>
 )["index.test"];
@@ -305,5 +317,216 @@ describe("refresh and destroy", () => {
   test("destroy of an unknown identity is a no-op", async () => {
     const t = initConvexTest();
     expect(await t.action(api.destroy, alice)).toBeNull();
+  });
+});
+
+const call = (
+  t: ReturnType<typeof initConvexTest>,
+  method: string,
+  args: Record<string, unknown> = {},
+) => t.action(api.op, { method, args: { ...alice, ...args } }) as Promise<any>;
+const row = (t: ReturnType<typeof initConvexTest>) =>
+  t.query(components.tenki.sandboxes.get, alice);
+const reply = (stdout: string, exitCode = 0) => ({
+  exitCode,
+  stdout: text(stdout),
+  stderr: new Uint8Array(),
+  reason: "exit",
+  durationMs: 1,
+});
+
+describe("pause and resume", () => {
+  test("pause waits for paused; resume waits until commands run", async () => {
+    const t = initConvexTest();
+    await t.action(api.create, alice);
+    expect((await call(t, "pause"))?.phase).toBe("paused");
+    expect(await convexErrorData(call(t, "pause"))).toMatchObject({
+      code: "not_ready",
+      phase: "paused",
+    });
+
+    let probes = 0;
+    fake.onExec = (argv) =>
+      argv[0] === "true" && ++probes === 1
+        ? sdkError("StreamClosedError")
+        : reply("");
+    const resumed = await call(t, "resume");
+    expect(resumed.phase).toBe("ready");
+    expect(probes).toBe(2);
+  });
+
+  test("pause without waiting reports pausing until a refresh sees paused", async () => {
+    const t = initConvexTest();
+    const { sessionId } = await t.action(api.create, alice);
+    expect((await call(t, "pause", { wait: false }))?.phase).toBe("pausing");
+    fake.sessions.get(sessionId!)!.state = "PAUSED";
+    expect((await t.action(api.refresh, alice))?.phase).toBe("paused");
+  });
+
+  test("a sandbox paused behind the row's back is re-synced on the next call", async () => {
+    const t = initConvexTest();
+    const { sessionId } = await t.action(api.create, alice);
+    fake.sessions.get(sessionId!)!.state = "PAUSED";
+    fake.execError = sdkError("InvalidStateError", "session is paused");
+    expect(
+      await convexErrorData(t.action(api.exec, { ...alice, command: "true" })),
+    ).toMatchObject({
+      code: "invalid_state",
+    });
+    expect((await row(t))?.phase).toBe("paused");
+  });
+});
+
+describe("background processes", () => {
+  test("spawn passes the command through env, never the script", async () => {
+    const t = initConvexTest();
+    await t.action(api.create, alice);
+    fake.onExec = () => reply("4242\n");
+    const spawned = await call(t, "spawn", {
+      command: "python3 -m http.server 8080 'quoted; $(rm -rf /)'",
+    });
+    expect(spawned.pid).toBe(4242);
+    expect(spawned.processId).toMatch(/^[a-z0-9]{16}$/);
+    const options = fake.execOptions.at(-1)!;
+    expect(options.env).toMatchObject({
+      TENKI_CVX_ID: spawned.processId,
+      TENKI_CVX_CMD: "python3 -m http.server 8080 'quoted; $(rm -rf /)'",
+    });
+    const session = [...fake.sessions.values()][0];
+    expect(session.argv.at(-1)).toEqual(["bash", "-c", SPAWN_SCRIPT]);
+  });
+
+  test("processStatus parses state, exit code and truncation", async () => {
+    const t = initConvexTest();
+    await t.action(api.create, alice);
+    fake.onExec = () => reply("exited 3 5\nhello");
+    expect(
+      await call(t, "processStatus", { processId: "abcdef0123456789" }),
+    ).toEqual({
+      state: "exited",
+      exitCode: 3,
+      output: "hello",
+      outputTruncated: false,
+    });
+    fake.onExec = () => reply("running - 100\nlast bytes");
+    expect(
+      await call(t, "processStatus", {
+        processId: "abcdef0123456789",
+        tailBytes: 10,
+      }),
+    ).toMatchObject({
+      state: "running",
+      outputTruncated: true,
+    });
+    fake.onExec = () => reply("missing\n");
+    expect(
+      await call(t, "processStatus", { processId: "abcdef0123456789" }),
+    ).toMatchObject({ state: "missing" });
+  });
+
+  test("rejects process ids that could escape the process directory", async () => {
+    const t = initConvexTest();
+    await t.action(api.create, alice);
+    await expect(
+      call(t, "processStatus", { processId: "../../etc" }),
+    ).rejects.toThrow(/invalid processId/);
+  });
+
+  test("kill sends an allowed signal", async () => {
+    const t = initConvexTest();
+    await t.action(api.create, alice);
+    fake.onExec = () => reply("signaled\n");
+    expect(await call(t, "kill", { processId: "abcdef0123456789" })).toEqual({
+      signaled: true,
+    });
+    expect(fake.execOptions.at(-1)!.env).toMatchObject({
+      TENKI_CVX_SIGNAL: "TERM",
+    });
+    expect(
+      await convexErrorData(
+        call(t, "kill", { processId: "abcdef0123456789", signal: "STOP" }),
+      ),
+    ).toMatchObject({
+      code: "invalid_argument",
+    });
+  });
+});
+
+describe("files, ports and lifetime", () => {
+  test("files round-trip as text and bytes", async () => {
+    const t = initConvexTest();
+    await t.action(api.create, alice);
+    await call(t, "writeFile", { path: "/home/tenki/a.txt", data: "héllo" });
+    expect(await call(t, "readFile", { path: "/home/tenki/a.txt" })).toBe(
+      "héllo",
+    );
+    await call(t, "writeFile", {
+      path: "/home/tenki/b.bin",
+      data: new Uint8Array([0, 255, 7]).buffer,
+    });
+    const bytes = await call(t, "readFile", {
+      path: "/home/tenki/b.bin",
+      encoding: "bytes",
+    });
+    expect([...new Uint8Array(bytes)]).toEqual([0, 255, 7]);
+    expect(
+      await convexErrorData(call(t, "readFile", { path: "/nope" })),
+    ).toMatchObject({ code: "file_not_found" });
+  });
+
+  test("exposed ports are recorded per port and cleared on re-create", async () => {
+    const t = initConvexTest();
+    await t.action(api.create, alice);
+    await call(t, "exposePort", { port: 8080, slug: "a" });
+    await call(t, "exposePort", { port: 3000 });
+    await call(t, "exposePort", { port: 8080, slug: "b" });
+    expect((await row(t))?.previews).toEqual([
+      { port: 3000, url: "https://p-3000.preview.test" },
+      { port: 8080, url: "https://b-8080.preview.test" },
+    ]);
+    await t.action(api.destroy, alice);
+    expect((await t.action(api.create, alice)).previews).toBeUndefined();
+  });
+
+  test("extend pushes the deadline out", async () => {
+    const t = initConvexTest();
+    const before = (await t.action(api.create, alice)).remote!.timeoutAt!;
+    const after = await call(t, "extend", { additionalMs: 60_000 });
+    expect(after.remote.timeoutAt).toBe(before + 60_000);
+  });
+});
+
+describe("snapshots and fork", () => {
+  test("snapshot is recorded; fork creates the target from it", async () => {
+    const t = initConvexTest();
+    const source = await t.action(api.create, alice);
+    const forked = await call(t, "fork", {
+      from: "main",
+      to: "experiment",
+      name: "before-refactor",
+    });
+    expect(fake.snapshots).toEqual([
+      { sessionId: source.sessionId, options: { name: "before-refactor" } },
+    ]);
+    expect(fake.creates.at(-1)).toMatchObject({ snapshotId: "snap-1" });
+    expect(forked).toMatchObject({ key: "experiment", phase: "ready" });
+    expect(forked.sessionId).not.toBe(source.sessionId);
+    expect(await call(t, "listSnapshots")).toMatchObject([
+      { snapshotId: "snap-1", name: "before-refactor" },
+    ]);
+  });
+});
+
+describe("reconcile", () => {
+  test("catches rows up with sandboxes that ended", async () => {
+    const t = initConvexTest();
+    const a = await t.action(api.create, alice);
+    await t.action(api.create, { ownerId: "user_bob", key: "main" });
+    fake.sessions.delete(a.sessionId!);
+    expect(await t.action(api.op, { method: "reconcile", args: {} })).toEqual({
+      checked: 2,
+      changed: 1,
+    });
+    expect((await row(t))?.phase).toBe("terminated");
   });
 });

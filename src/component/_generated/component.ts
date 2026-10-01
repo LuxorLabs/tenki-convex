@@ -45,6 +45,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
               | "resuming"
               | "terminated"
               | "error";
+            previews?: Array<{ expiresAt?: number; port: number; url: string }>;
             remote?: {
               cpuCores: number;
               diskSizeGb: number;
@@ -101,6 +102,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
               | "resuming"
               | "terminated"
               | "error";
+            previews?: Array<{ expiresAt?: number; port: number; url: string }>;
             remote?: {
               cpuCores: number;
               diskSizeGb: number;
@@ -147,6 +149,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             | "resuming"
             | "terminated"
             | "error";
+          previews?: Array<{ expiresAt?: number; port: number; url: string }>;
           remote?: {
             cpuCores: number;
             diskSizeGb: number;
@@ -179,6 +182,114 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             | "resuming"
             | "terminated"
             | "error";
+          previews?: Array<{ expiresAt?: number; port: number; url: string }>;
+          remote?: {
+            cpuCores: number;
+            diskSizeGb: number;
+            memoryMb: number;
+            state: string;
+            sticky: boolean;
+            timeoutAt?: number;
+          };
+          sessionId?: string;
+          updatedAt: number;
+        }>,
+        Name
+      >;
+      listSnapshots: FunctionReference<
+        "query",
+        "internal",
+        { key: string; limit?: number; ownerId: string },
+        Array<{
+          _creationTime: number;
+          _id: string;
+          key: string;
+          name?: string;
+          ownerId: string;
+          sessionId: string;
+          snapshotId: string;
+        }>,
+        Name
+      >;
+      recordSnapshot: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          key: string;
+          name?: string;
+          ownerId: string;
+          sessionId: string;
+          snapshotId: string;
+        },
+        {
+          _creationTime: number;
+          _id: string;
+          key: string;
+          name?: string;
+          ownerId: string;
+          sessionId: string;
+          snapshotId: string;
+        },
+        Name
+      >;
+      setPreview: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          key: string;
+          ownerId: string;
+          preview: { expiresAt?: number; port: number; url: string };
+          sessionId: string;
+        },
+        {
+          _creationTime: number;
+          _id: string;
+          claim?: { expiresAt: number; token: string };
+          key: string;
+          lastError?: { at: number; code: string; message: string };
+          ownerId: string;
+          phase:
+            | "provisioning"
+            | "ready"
+            | "pausing"
+            | "paused"
+            | "resuming"
+            | "terminated"
+            | "error";
+          previews?: Array<{ expiresAt?: number; port: number; url: string }>;
+          remote?: {
+            cpuCores: number;
+            diskSizeGb: number;
+            memoryMb: number;
+            state: string;
+            sticky: boolean;
+            timeoutAt?: number;
+          };
+          sessionId?: string;
+          updatedAt: number;
+        } | null,
+        Name
+      >;
+      stale: FunctionReference<
+        "query",
+        "internal",
+        { limit: number },
+        Array<{
+          _creationTime: number;
+          _id: string;
+          claim?: { expiresAt: number; token: string };
+          key: string;
+          lastError?: { at: number; code: string; message: string };
+          ownerId: string;
+          phase:
+            | "provisioning"
+            | "ready"
+            | "pausing"
+            | "paused"
+            | "resuming"
+            | "terminated"
+            | "error";
+          previews?: Array<{ expiresAt?: number; port: number; url: string }>;
           remote?: {
             cpuCores: number;
             diskSizeGb: number;
@@ -231,6 +342,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             | "resuming"
             | "terminated"
             | "error";
+          previews?: Array<{ expiresAt?: number; port: number; url: string }>;
           remote?: {
             cpuCores: number;
             diskSizeGb: number;
