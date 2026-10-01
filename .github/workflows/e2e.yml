@@ -21,6 +21,7 @@ jobs:
     env:
       TENKI_API_KEY: ${{ secrets.TENKI_API_KEY }}
       CONVEX_AGENT_MODE: anonymous
+      CONVEX_URL: http://127.0.0.1:3210
       E2E_SLOW: ${{ github.event_name == 'schedule' && '1' || '0' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -40,6 +41,7 @@ jobs:
       - name: Start a local Convex backend
         run: |
           npx convex init
+          cat .env.local
           npx convex dev --typecheck disable > convex-dev.log 2>&1 &
           for i in $(seq 1 120); do
             grep -q "functions ready" convex-dev.log && break
