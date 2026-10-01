@@ -8,9 +8,15 @@
  * @module
  */
 
+import type * as auth from "../auth.js";
 import type * as crons from "../crons.js";
-import type * as workspace from "../workspace.js";
-import type * as workspaceActions from "../workspaceActions.js";
+import type * as demo from "../demo.js";
+import type * as demoQueries from "../demoQueries.js";
+import type * as e2e from "../e2e.js";
+import type * as e2eGate from "../e2eGate.js";
+import type * as e2eQueries from "../e2eQueries.js";
+import type * as http from "../http.js";
+import type * as maintenance from "../maintenance.js";
 
 import type {
   ApiFromModules,
@@ -19,9 +25,15 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  auth: typeof auth;
   crons: typeof crons;
-  workspace: typeof workspace;
-  workspaceActions: typeof workspaceActions;
+  demo: typeof demo;
+  demoQueries: typeof demoQueries;
+  e2e: typeof e2e;
+  e2eGate: typeof e2eGate;
+  e2eQueries: typeof e2eQueries;
+  http: typeof http;
+  maintenance: typeof maintenance;
 }>;
 
 /**

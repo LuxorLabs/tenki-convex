@@ -18,7 +18,11 @@ export default [
     languageOptions: {
       parser: tseslint.parser,
       parserOptions: {
-        project: ["./tsconfig.json", "./example/convex/tsconfig.json"],
+        project: [
+          "./tsconfig.json",
+          "./example/convex/tsconfig.json",
+          "./example/tsconfig.json",
+        ],
         tsconfigRootDir: import.meta.dirname,
       },
     },
@@ -54,6 +58,12 @@ export default [
           allowTaggedTemplates: true,
         },
       ],
+    },
+  },
+  {
+    files: ["example/src/**/*.{ts,tsx}"],
+    languageOptions: {
+      globals: globals.browser,
     },
   },
   {
