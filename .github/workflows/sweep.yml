@@ -1,0 +1,30 @@
+name: Sweep e2e sandboxes
+on:
+  schedule:
+    - cron: "41 * * * *"
+  workflow_dispatch:
+
+jobs:
+  sweep:
+    name: Terminate leftover e2e sandboxes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      TENKI_API_KEY: ${{ secrets.TENKI_API_KEY }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Node setup
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          cache-dependency-path: package.json
+          node-version: "24.x"
+          cache: "npm"
+
+      - name: Install and build
+        run: |
+          npm ci
+          npm run build
+
+      - name: Sweep
+        run: node scripts/sweep.mjs

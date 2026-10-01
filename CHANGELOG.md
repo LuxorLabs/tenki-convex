@@ -8,3 +8,4 @@
 - Start background processes and check on them, read and write files, and expose
   ports as public URLs.
 - `reconcile` keeps rows in sync with sandboxes that reached their deadline.
+- An empty Tenki workspace balance is reported as `insufficient_credits`.

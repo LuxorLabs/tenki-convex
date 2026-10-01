@@ -34,3 +34,5 @@ jobs:
           npm run test
           npm run typecheck
           npm run lint
+      - name: Check the packed package
+        run: npm run pack:check

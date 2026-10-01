@@ -17,6 +17,12 @@
     {
       "matchDepTypes": ["devDependencies"],
       "automerge": true
+    },
+    {
+      "description": "Each Tenki SDK release gets its own PR; the e2e suite must pass and a human merges it.",
+      "matchPackageNames": ["@tenkicloud/sandbox"],
+      "automerge": false,
+      "labels": ["tenki-sdk"]
     }
   ]
 }

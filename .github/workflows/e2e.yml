@@ -1,0 +1,58 @@
+name: E2E
+on:
+  pull_request:
+    branches: ["**"]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+
+# The Tenki test workspace caps concurrent sandboxes, so runs never overlap.
+concurrency:
+  group: e2e
+  cancel-in-progress: false
+
+jobs:
+  e2e:
+    name: E2E against Tenki
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TENKI_API_KEY: ${{ secrets.TENKI_API_KEY }}
+      CONVEX_AGENT_MODE: anonymous
+      E2E_SLOW: ${{ github.event_name == 'schedule' && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Node setup
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          cache-dependency-path: package.json
+          node-version: "24.x"
+          cache: "npm"
+
+      - name: Install and build
+        run: |
+          npm ci
+          npm run build
+
+      - name: Start a local Convex backend
+        run: |
+          npx convex init
+          npx convex dev --typecheck disable > convex-dev.log 2>&1 &
+          for i in $(seq 1 120); do
+            grep -q "functions ready" convex-dev.log && break
+            if grep -q "✖" convex-dev.log; then cat convex-dev.log; exit 1; fi
+            sleep 1
+          done
+          grep -q "functions ready" convex-dev.log || { cat convex-dev.log; exit 1; }
+          printf '%s' "$TENKI_API_KEY" | npx convex env set TENKI_API_KEY
+          npx convex env set TENKI_E2E 1
+
+      - name: Run e2e
+        run: npm run e2e
+
+      - name: Backend log
+        if: failure()
+        run: cat convex-dev.log
