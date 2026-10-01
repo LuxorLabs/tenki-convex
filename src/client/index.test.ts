@@ -169,6 +169,18 @@ describe("create", () => {
     expect(sandbox.lastError).toBeUndefined();
   });
 
+  test("an empty workspace balance is reported as insufficient_credits", async () => {
+    const t = initConvexTest();
+    fake.failCreate = sdkError(
+      "InvalidStateError",
+      "[failed_precondition] workspace balance is empty; top up to start a sandbox",
+    );
+    expect(await convexErrorData(t.action(api.create, alice))).toMatchObject({
+      code: "insufficient_credits",
+    });
+    expect((await row(t))?.lastError?.code).toBe("insufficient_credits");
+  });
+
   test("namespaces keep deployments from adopting each other's sessions", async () => {
     expect(await adoptionTag("a", "u", "k")).not.toBe(
       await adoptionTag("b", "u", "k"),

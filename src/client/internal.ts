@@ -120,8 +120,14 @@ const ERROR_CODES: Record<string, string> = {
   InboundDisabledError: "inbound_disabled",
 };
 
+// Tenki reports an empty balance as a generic failed_precondition.
+const NO_CREDITS = /balance is empty|top up/i;
+
 export function describeError(err: unknown): { code: string; message: string } {
   if (err instanceof Error) {
+    if (err.name === "InvalidStateError" && NO_CREDITS.test(err.message)) {
+      return { code: "insufficient_credits", message: err.message };
+    }
     return { code: ERROR_CODES[err.name] ?? "internal", message: err.message };
   }
   return { code: "internal", message: String(err) };
