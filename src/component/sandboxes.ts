@@ -49,14 +49,29 @@ export const list = query({
  * A terminated or failed sandbox is reclaimed so the key can be reused.
  */
 export const claim = mutation({
-  args: { ...identity, token: v.string(), leaseMs: v.number() },
-  returns: v.object({ claimed: v.boolean(), sandbox: sandboxValidator }),
+  args: {
+    ...identity,
+    token: v.string(),
+    leaseMs: v.number(),
+    // Refuse to start a new sandbox once this many are active across all owners.
+    maxActive: v.optional(v.number()),
+  },
+  returns: v.object({
+    claimed: v.boolean(),
+    full: v.optional(v.boolean()),
+    sandbox: v.union(sandboxValidator, v.null()),
+  }),
   handler: async (ctx, args) => {
     requireIdentity(args);
     const now = Date.now();
     const lease = { token: args.token, expiresAt: now + args.leaseMs };
     const existing = await find(ctx, args.ownerId, args.key);
+    const atCapacity = async () =>
+      args.maxActive !== undefined &&
+      (await countActive(ctx, args.maxActive, now)) >= args.maxActive;
     if (!existing) {
+      if (await atCapacity())
+        return { claimed: false, full: true, sandbox: null };
       const id = await ctx.db.insert("sandboxes", {
         ownerId: args.ownerId,
         key: args.key,
@@ -73,6 +88,8 @@ export const claim = mutation({
         !existing.sessionId &&
         (!existing.claim || existing.claim.expiresAt < now));
     if (!reclaimable) return { claimed: false, sandbox: existing };
+    if (await atCapacity())
+      return { claimed: false, full: true, sandbox: existing };
     await ctx.db.patch("sandboxes", existing._id, {
       phase: "provisioning",
       claim: lease,
@@ -190,25 +207,65 @@ const LIVE_PHASES = [
   "resuming",
   "provisioning",
 ] as const;
+// Paused sandboxes hold no compute, matching Tenki's own active-session count.
+const ACTIVE_PHASES = ["ready", "pausing", "resuming", "provisioning"] as const;
 
-/** Least recently updated live rows across all owners, for periodic reconciliation. */
+/** Counts active sandboxes, including creates in flight, up to `limit`. */
+async function countActive(ctx: QueryCtx, limit: number, now: number) {
+  let count = 0;
+  for (const phase of ACTIVE_PHASES) {
+    const rows = await ctx.db
+      .query("sandboxes")
+      .withIndex("by_phase_updated", (q) => q.eq("phase", phase))
+      // Bounded by the phase index; skips only abandoned claims.
+      // eslint-disable-next-line @convex-dev/no-filter-in-query
+      .filter((q) =>
+        q.or(
+          q.neq(q.field("sessionId"), undefined),
+          q.gte(q.field("claim.expiresAt"), now),
+        ),
+      )
+      .take(limit - count);
+    count += rows.length;
+    if (count >= limit) break;
+  }
+  return count;
+}
+
+/** Least recently updated live rows with a session, across all owners, for periodic reconciliation. */
 export const stale = query({
   args: { limit: v.number() },
   returns: v.array(sandboxValidator),
   handler: async (ctx, args) => {
+    const limit = Math.max(1, Math.min(Math.floor(args.limit), 200));
     const perPhase = await Promise.all(
       LIVE_PHASES.map((phase) =>
         ctx.db
           .query("sandboxes")
           .withIndex("by_phase_updated", (q) => q.eq("phase", phase))
-          .take(args.limit),
+          // Bounded by the phase index; skips only creates that never got a session.
+          // eslint-disable-next-line @convex-dev/no-filter-in-query
+          .filter((q) => q.neq(q.field("sessionId"), undefined))
+          .take(limit),
       ),
     );
     return perPhase
       .flat()
-      .filter((row) => row.sessionId)
       .sort((a, b) => a.updatedAt - b.updatedAt)
-      .slice(0, args.limit);
+      .slice(0, limit);
+  },
+});
+
+/** Moves a row to the back of the reconcile queue without changing it. */
+export const touch = mutation({
+  args: { ...identity, sessionId: v.string() },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const existing = await find(ctx, args.ownerId, args.key);
+    if (existing?.sessionId === args.sessionId) {
+      await ctx.db.patch("sandboxes", existing._id, { updatedAt: Date.now() });
+    }
+    return null;
   },
 });
 

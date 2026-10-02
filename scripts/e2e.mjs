@@ -280,6 +280,7 @@ try {
         ownerId: alice.ownerId,
         from: "main",
         to: "fork",
+        tags: [runTag],
       });
       assert.equal(forked.phase, "ready");
       assert.notEqual(

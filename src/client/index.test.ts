@@ -44,6 +44,23 @@ export const destroy = actionGeneric({
     await tenki(namespace).destroy(ctx, args),
 });
 
+const capped = () =>
+  new Tenki(components.tenki, {
+    client: fake,
+    namespace: NS,
+    maxActiveSandboxes: 1,
+  });
+
+export const createCapped = actionGeneric({
+  args: { ownerId: v.string(), key: v.string() },
+  handler: async (ctx, args) => await capped().create(ctx, args),
+});
+
+export const forkCapped = actionGeneric({
+  args: { ownerId: v.string(), from: v.string(), to: v.string() },
+  handler: async (ctx, args) => await capped().fork(ctx, args),
+});
+
 export const op = actionGeneric({
   args: { method: v.string(), args: v.any() },
   handler: async (ctx, { method, args }) => {
@@ -63,6 +80,8 @@ const api = (
       refresh: typeof refresh;
       destroy: typeof destroy;
       op: typeof op;
+      createCapped: typeof createCapped;
+      forkCapped: typeof forkCapped;
     };
   }>
 )["index.test"];
@@ -540,5 +559,142 @@ describe("reconcile", () => {
       changed: 1,
     });
     expect((await row(t))?.phase).toBe("terminated");
+  });
+});
+
+describe("review fixes", () => {
+  test("a create that fails after the session exists closes it", async () => {
+    const t = initConvexTest();
+    fake.failCreateAfterSession = "WaitReadyFailedError";
+    expect(await convexErrorData(t.action(api.create, alice))).toMatchObject({
+      code: "not_ready",
+    });
+    const [stuck] = [...fake.sessions.values()];
+    expect(stuck.state).toBe("TERMINATING");
+    expect((await row(t))?.phase).toBe("error");
+
+    fake.failCreateAfterSession = undefined;
+    const sandbox = await t.action(api.create, alice);
+    expect(sandbox.phase).toBe("ready");
+    expect(sandbox.sessionId).not.toBe(stuck.id);
+  });
+
+  test("an adopted session that never gets ready is closed, not re-adopted forever", async () => {
+    const t = initConvexTest();
+    const stuck = fake.seed(
+      [await adoptionTag(NS, alice.ownerId, alice.key)],
+      "CREATING",
+    );
+    fake.failWaitReady = new Error(
+      `timeout waiting for session ${stuck.id} to become ready`,
+    );
+    await expect(t.action(api.create, alice)).rejects.toThrow();
+    expect(stuck.state).toBe("TERMINATING");
+
+    fake.failWaitReady = undefined;
+    const sandbox = await t.action(api.create, alice);
+    expect(sandbox.sessionId).not.toBe(stuck.id);
+  });
+
+  test("a guest shutdown is resumable, not terminated", async () => {
+    const t = initConvexTest();
+    const { sessionId } = await t.action(api.create, alice);
+    fake.sessions.get(sessionId!)!.state = "USER_SHUTDOWN";
+    expect((await t.action(api.refresh, alice))?.phase).toBe("paused");
+    expect((await t.action(api.create, alice)).sessionId).toBe(sessionId);
+    await t.action(api.destroy, alice);
+    expect(fake.sessions.get(sessionId!)!.state).toBe("TERMINATING");
+  });
+
+  test("a failed pause re-syncs the row instead of leaving it pausing", async () => {
+    const t = initConvexTest();
+    await t.action(api.create, alice);
+    fake.failPause = sdkError(
+      "PauseFailedError",
+      "pause failed: session reverted to RUNNING",
+    );
+    expect(await convexErrorData(call(t, "pause"))).toMatchObject({
+      code: "pause_failed",
+    });
+    expect((await row(t))?.phase).toBe("ready");
+  });
+
+  test("a failed resume re-syncs the row instead of leaving it resuming", async () => {
+    const t = initConvexTest();
+    await t.action(api.create, alice);
+    await call(t, "pause");
+    fake.failResume = sdkError("ResumeFailedError", "resume failed");
+    expect(await convexErrorData(call(t, "resume"))).toMatchObject({
+      code: "resume_failed",
+    });
+    expect((await row(t))?.phase).toBe("paused");
+  });
+
+  test("a concurrent create surfaces the lease holder's failure", async () => {
+    const t = initConvexTest();
+    fake.createDelayMs = 50;
+    fake.failCreate = sdkError("QuotaExceededError", "out of quota");
+    const results = await Promise.allSettled(
+      [1, 2].map(() => t.action(api.create, alice)),
+    );
+    expect(results.map((r) => r.status)).toEqual(["rejected", "rejected"]);
+    for (const r of results) {
+      expect(
+        ((r as PromiseRejectedResult).reason as ConvexError<{ code: string }>)
+          .data.code,
+      ).toBe("quota_exceeded");
+    }
+  });
+
+  test("maxActiveSandboxes caps creates and forks across owners, ignoring paused ones", async () => {
+    const t = initConvexTest();
+    await t.action(api.createCapped, alice);
+    expect(
+      await convexErrorData(
+        t.action(api.createCapped, { ownerId: "user_bob", key: "main" }),
+      ),
+    ).toMatchObject({ code: "capacity_exceeded" });
+    expect(
+      await convexErrorData(
+        t.action(api.forkCapped, {
+          ownerId: alice.ownerId,
+          from: "main",
+          to: "fork",
+        }),
+      ),
+    ).toMatchObject({ code: "capacity_exceeded" });
+
+    await call(t, "pause");
+    expect(
+      (await t.action(api.createCapped, { ownerId: "user_bob", key: "main" }))
+        .phase,
+    ).toBe("ready");
+  });
+
+  test("reconcile rotates past rows that keep failing", async () => {
+    const t = initConvexTest();
+    const bad = await t.action(api.create, {
+      ownerId: "user_bad",
+      key: "main",
+    });
+    await t.action(api.create, alice);
+    const realGet = fake.get.bind(fake);
+    // Rows touched in the same millisecond tie on updatedAt; real runs are minutes apart.
+    const reconcileOne = async () => {
+      await new Promise((r) => setTimeout(r, 5));
+      await t.action(api.op, { method: "reconcile", args: { limit: 1 } });
+    };
+    fake.get = async (id) =>
+      id === bad.sessionId
+        ? Promise.reject(sdkError("PermissionDeniedError"))
+        : realGet(id);
+    await reconcileOne();
+    await reconcileOne();
+    const stale = await t.query(components.tenki.sandboxes.stale, { limit: 1 });
+    expect(stale[0].ownerId).toBe("user_bad");
+    fake.sessions.get((await row(t))!.sessionId!)!.state = "PAUSED";
+    await reconcileOne();
+    await reconcileOne();
+    expect((await row(t))?.phase).toBe("paused");
   });
 });

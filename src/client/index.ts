@@ -77,6 +77,12 @@ export interface TenkiOptions {
   namespace?: string;
   /** Applied to every `create` call; per-call options win. */
   defaults?: CreateSandboxOptions;
+  /**
+   * Refuse to start a new sandbox once this many are active (not paused) across
+   * all owners, counting creates in flight; `create` then throws
+   * `capacity_exceeded`. Checked in the same transaction that reserves the row.
+   */
+  maxActiveSandboxes?: number;
   client?: SandboxClient;
 }
 
@@ -180,24 +186,35 @@ export class Tenki {
   ) {
     const identity = pick(args);
     const token = crypto.randomUUID();
-    const { claimed, sandbox } = await ctx.runMutation(
+    const { claimed, full, sandbox } = await ctx.runMutation(
       this.component.sandboxes.claim,
       {
         ...identity,
         token,
         leaseMs: CREATE_LEASE_MS,
+        maxActive: this.options.maxActiveSandboxes,
       },
     );
+    if (full) {
+      throw new ConvexError({
+        code: "capacity_exceeded",
+        message: "Too many active sandboxes; try again later",
+      });
+    }
     if (!claimed) {
-      return sandbox.phase === "provisioning"
+      return sandbox!.phase === "provisioning"
         ? await this.waitForPeer(ctx, identity)
-        : sandbox;
+        : sandbox!;
     }
 
+    // Whatever session this call holds is closed if create fails, so a failed
+    // create never leaves a billed sandbox that later calls would re-adopt.
+    let held: SandboxSession | undefined;
     try {
       const sdk = this.client();
       const tag = await this.tag(identity);
       let session = canonical((await sdk.list({ tags: [tag] })).filter(isLive));
+      held = session;
       if (!session) {
         const options = { ...this.options.defaults, ...args.options };
         const created = await sdk.create({
@@ -216,7 +233,9 @@ export class Tenki {
           },
           waitReady: true,
         });
+        held = created;
         session = await this.settleRace(sdk, tag, created);
+        held = session;
       }
       if (session.state === "CREATING") await session.waitReady();
       cacheSession(session);
@@ -230,6 +249,11 @@ export class Tenki {
       if (result.accepted) return result.sandbox!;
       return await this.waitForPeer(ctx, identity);
     } catch (err) {
+      const orphan = held ?? (err as { session?: SandboxSession }).session;
+      if (orphan) {
+        sessionCache.delete(orphan.id);
+        await orphan.close().catch(() => {});
+      }
       await ctx.runMutation(this.component.sandboxes.fail, {
         ...identity,
         token,
@@ -440,12 +464,17 @@ export class Tenki {
         sessionId,
         phase: "pausing",
       });
-      if (args.wait === false) {
-        await session.pauseAsync();
-      } else {
-        // PauseSession can return while the session is still PAUSING.
-        await session.pause();
-        await session.waitPaused();
+      try {
+        if (args.wait === false) {
+          await session.pauseAsync();
+        } else {
+          // PauseSession can return while the session is still PAUSING.
+          await session.pause();
+          await session.waitPaused();
+        }
+      } catch (err) {
+        await this.syncFromRemote(ctx, identity, sessionId).catch(() => {});
+        throw err;
       }
       return await this.syncFromRemote(ctx, identity, sessionId);
     });
@@ -464,9 +493,14 @@ export class Tenki {
           sessionId,
           phase: "resuming",
         });
-        await session.resume();
-        await session.waitResumed();
-        await waitForExec(session, RESUME_READY_MS);
+        try {
+          await session.resume();
+          await session.waitResumed();
+          await waitForExec(session, RESUME_READY_MS);
+        } catch (err) {
+          await this.syncFromRemote(ctx, identity, sessionId).catch(() => {});
+          throw err;
+        }
         return await ctx.runMutation(this.component.sandboxes.sync, {
           ...identity,
           sessionId,
@@ -569,7 +603,11 @@ export class Tenki {
         const after = await this.syncFromRemote(ctx, pick(row), row.sessionId!);
         if (after?.phase !== row.phase) changed++;
       } catch {
-        // Leave the row for the next run.
+        // Retried next run, after the rows that haven't been checked yet.
+        await ctx.runMutation(this.component.sandboxes.touch, {
+          ...pick(row),
+          sessionId: row.sessionId!,
+        });
       }
     }
     return { checked: rows.length, changed };
@@ -702,12 +740,30 @@ export class Tenki {
     return winner;
   }
 
+  /** Waits for a concurrent create of the same identity, surfacing its failure. */
   private async waitForPeer(ctx: ActionCtx, identity: Identity) {
     const deadline = Date.now() + WAIT_FOR_PEER_MS;
     for (;;) {
       const sandbox = await this.get(ctx, identity);
-      if (!sandbox || sandbox.phase !== "provisioning" || Date.now() > deadline)
-        return sandbox!;
+      if (!sandbox) {
+        throw new ConvexError({
+          code: "not_found",
+          message: `no sandbox for key "${identity.key}"`,
+        });
+      }
+      if (sandbox.phase === "error") {
+        throw new ConvexError({
+          code: sandbox.lastError?.code ?? "internal",
+          message: sandbox.lastError?.message ?? "create failed",
+        });
+      }
+      if (sandbox.phase !== "provisioning") return sandbox;
+      if (Date.now() > deadline) {
+        throw new ConvexError({
+          code: "provisioning_timeout",
+          message: "sandbox is still provisioning",
+        });
+      }
       await sleep(WAIT_POLL_MS);
     }
   }

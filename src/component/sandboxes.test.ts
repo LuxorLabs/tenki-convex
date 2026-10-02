@@ -21,14 +21,14 @@ describe("claim", () => {
       leaseMs: LEASE,
     });
     expect(first.claimed).toBe(true);
-    expect(first.sandbox.phase).toBe("provisioning");
+    expect(first.sandbox!.phase).toBe("provisioning");
     const second = await t.mutation(api.sandboxes.claim, {
       ...alice,
       token: "b",
       leaseMs: LEASE,
     });
     expect(second.claimed).toBe(false);
-    expect(second.sandbox.claim?.token).toBe("a");
+    expect(second.sandbox!.claim?.token).toBe("a");
   });
 
   test("an expired lease without a session can be taken over", async () => {
@@ -44,7 +44,7 @@ describe("claim", () => {
       leaseMs: LEASE,
     });
     expect(takeover.claimed).toBe(true);
-    expect(takeover.sandbox.claim?.token).toBe("b");
+    expect(takeover.sandbox!.claim?.token).toBe("b");
   });
 
   test("a ready sandbox is never reclaimed", async () => {
@@ -67,7 +67,7 @@ describe("claim", () => {
       leaseMs: -1,
     });
     expect(again.claimed).toBe(false);
-    expect(again.sandbox.sessionId).toBe("s1");
+    expect(again.sandbox!.sessionId).toBe("s1");
   });
 
   test("terminated and failed sandboxes are reclaimed with a clean slate", async () => {
@@ -95,8 +95,8 @@ describe("claim", () => {
       leaseMs: LEASE,
     });
     expect(reclaimed.claimed).toBe(true);
-    expect(reclaimed.sandbox.sessionId).toBeUndefined();
-    expect(reclaimed.sandbox.remote).toBeUndefined();
+    expect(reclaimed.sandbox!.sessionId).toBeUndefined();
+    expect(reclaimed.sandbox!.remote).toBeUndefined();
 
     await t.mutation(api.sandboxes.fail, {
       ...alice,
@@ -110,7 +110,7 @@ describe("claim", () => {
       leaseMs: LEASE,
     });
     expect(afterFailure.claimed).toBe(true);
-    expect(afterFailure.sandbox.lastError).toBeUndefined();
+    expect(afterFailure.sandbox!.lastError).toBeUndefined();
   });
 
   test("rejects empty identities", async () => {
@@ -250,5 +250,91 @@ describe("list", () => {
     expect(
       await t.query(api.sandboxes.get, { ownerId: "user_bob", key: "second" }),
     ).toBeNull();
+  });
+});
+
+describe("stale", () => {
+  test("rows without a session never crowd out rows that have one", async () => {
+    const t = initConvexTest();
+    for (const key of ["a", "b", "c"]) {
+      await t.mutation(api.sandboxes.claim, {
+        ownerId: "o",
+        key,
+        token: key,
+        leaseMs: -1,
+      });
+    }
+    await t.mutation(api.sandboxes.claim, {
+      ...alice,
+      token: "x",
+      leaseMs: LEASE,
+    });
+    await t.mutation(api.sandboxes.complete, {
+      ...alice,
+      token: "x",
+      sessionId: "s1",
+      phase: "provisioning",
+      remote,
+    });
+    const rows = await t.query(api.sandboxes.stale, { limit: 2 });
+    expect(rows.map((r) => r.sessionId)).toEqual(["s1"]);
+  });
+
+  test("clamps the limit", async () => {
+    const t = initConvexTest();
+    await expect(t.query(api.sandboxes.stale, { limit: -5 })).resolves.toEqual(
+      [],
+    );
+    await expect(t.query(api.sandboxes.stale, { limit: 1e9 })).resolves.toEqual(
+      [],
+    );
+  });
+});
+
+describe("capacity", () => {
+  test("in-flight creates count; expired leases and paused sandboxes don't", async () => {
+    const t = initConvexTest();
+    await t.mutation(api.sandboxes.claim, {
+      ...alice,
+      token: "a",
+      leaseMs: LEASE,
+      maxActive: 1,
+    });
+    const blocked = await t.mutation(api.sandboxes.claim, {
+      ownerId: "user_bob",
+      key: "main",
+      token: "b",
+      leaseMs: LEASE,
+      maxActive: 1,
+    });
+    expect(blocked).toMatchObject({
+      claimed: false,
+      full: true,
+      sandbox: null,
+    });
+
+    await t.mutation(api.sandboxes.complete, {
+      ...alice,
+      token: "a",
+      sessionId: "s1",
+      phase: "paused",
+      remote,
+    });
+    const allowed = await t.mutation(api.sandboxes.claim, {
+      ownerId: "user_bob",
+      key: "main",
+      token: "b",
+      leaseMs: -1,
+      maxActive: 1,
+    });
+    expect(allowed.claimed).toBe(true);
+    const third = await t.mutation(api.sandboxes.claim, {
+      ownerId: "user_carol",
+      key: "main",
+      token: "c",
+      leaseMs: LEASE,
+      maxActive: 1,
+    });
+    expect(third.claimed).toBe(true);
   });
 });

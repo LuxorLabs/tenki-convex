@@ -41,7 +41,7 @@ checks that `reconcile` catches the row up. This adds about 80s.
 
 Every sandbox the run creates is tagged `cvx-e2e:<run>` and terminated at the
 end; the run fails if any remain. Scenarios destroy what they create, so at most
-three sandboxes are alive at once.
+two sandboxes are alive at once.
 
 The harness takes `ownerId` from its caller, so every function in it refuses to
 run unless `TENKI_E2E=1` is set on the deployment. Never set it on a deployment
@@ -63,9 +63,13 @@ on it and pass `CONVEX_URL=https://<deployment>.convex.cloud`.
 ### In CI
 
 `e2e.yml` starts an anonymous local Convex backend, sets `TENKI_API_KEY` from
-the repository secret and `TENKI_E2E=1`, and runs the suite. Runs share one
-concurrency group so they never overlap: the test workspace allows 5 active
-sandboxes. The nightly run adds the slow checks.
+the repository secret and `TENKI_E2E=1`, and runs the suite. The nightly run
+adds the slow checks.
+
+Concurrency is grouped by event and ref, so a new push to a PR cancels that PR's
+older run, while runs for different refs go ahead in parallel. The Test
+workspace allows 5 active sandboxes and a run keeps at most 2 alive, so two
+overlapping runs fit. Three or more at once can hit the limit.
 
 The secret is a key for the **Test** Tenki workspace, which keeps CI separate
 from anyone's personal workspace. When that workspace has no balance, every

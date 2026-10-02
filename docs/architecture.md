@@ -62,6 +62,22 @@ idempotency key, so three layers do the work:
    racing creator made another session, everyone keeps the oldest one (session
    ids are UUIDv7, so they sort by creation time) and terminates the rest.
 
+**Failure cleanup.** If `create` fails after a session exists, it closes that
+session before recording the error. That covers a session it created whose
+readiness wait failed (the SDK's error carries it) and an adopted session that
+never became ready. Otherwise the next `create` would adopt the same broken
+session again, and it would keep billing until its deadline.
+
+**Waiting on another caller.** A caller that finds another caller holding the
+lease waits for the row to leave `provisioning`. If that create failed, the
+waiting caller throws the same error, and after 3 minutes it throws
+`provisioning_timeout`. It never returns a row that isn't usable.
+
+**Capacity.** With `maxActiveSandboxes`, `claim` counts active rows (every live
+phase except `paused`, including in-flight creates whose lease hasn't expired)
+in the same transaction that reserves the row. Concurrent creates and forks
+can't get past the cap.
+
 **Namespace.** The namespace defaults to the deployment's `CONVEX_CLOUD_URL`, so
 a dev and a prod deployment sharing one Tenki workspace never adopt each other's
 sessions.
@@ -87,12 +103,19 @@ fits in a Convex value.
 
 A command run through `exec` dies when its stream ends, so `spawn` runs a fixed
 script that starts the command under `setsid nohup` and returns. Each process
-gets a directory, `$HOME/.tenki-convex/proc/<processId>/`, holding:
+gets a directory, `<home>/.tenki-convex/proc/<processId>/`, holding:
 
-- `pid`
+- `pid`, and `start`: the process start time read from `/proc/<pid>/stat`
 - `log` (combined stdout and stderr)
-- `exit` (written when the command exits)
+- `exit` (written to a temp file and renamed into place when the command exits,
+  so a status check never reads a half-written code)
 - `signal` (written by `kill`)
+
+`<home>` is the user's home directory from the passwd entry, not `$HOME`, so a
+`HOME` override in `spawn`'s `env` can't move the directory away from
+`processStatus` and `kill`. A pid only counts as the process when its current
+start time matches `start`, so after a restart a reused pid is reported as
+`lost` and is never signaled.
 
 `processStatus` and `kill` are fixed scripts too. User input reaches them only
 through environment variables, never through string interpolation. `processId`s
@@ -110,6 +133,11 @@ pause and resume, but not a guest-agent restart; it then reports `lost`.
   for `PAUSED` (`waitPaused`) before syncing the row.
 - **Resume.** Resume can report success before the guest agent answers again, so
   `resume` only marks the row `ready` after an `exec` of `true` succeeds.
+- **Failures.** If pausing or resuming fails or times out, the row is re-synced
+  from Tenki before the error is thrown, so it never stays `pausing` or
+  `resuming`.
+- **Guest shutdown.** A shutdown from inside the guest (`USER_SHUTDOWN`) is
+  stopped but resumable, so the row shows `paused`.
 
 ## Drift and `reconcile`
 
@@ -122,8 +150,10 @@ Rows catch up in three ways:
 - `refresh` re-reads one sandbox.
 - Any call that hits a gone session marks the row `terminated`, and an
   `invalid_state` error re-syncs the row.
-- `reconcile` walks the least recently updated live rows (index
-  `by_phase_updated`) and refreshes them. Customers run it from a cron.
+- `reconcile` walks the least recently updated live rows that have a session
+  (index `by_phase_updated`) and refreshes them. Customers run it from a cron. A
+  row it fails to refresh is touched, so it goes to the back of the queue and
+  can't starve the others.
 
 ## Errors
 

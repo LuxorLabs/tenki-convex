@@ -118,10 +118,15 @@ export const resume = action({
 });
 
 export const fork = action({
-  args: { ownerId: v.string(), from: v.string(), to: v.string() },
-  handler: async (ctx, args) => {
+  args: {
+    ownerId: v.string(),
+    from: v.string(),
+    to: v.string(),
+    tags: v.optional(v.array(v.string())),
+  },
+  handler: async (ctx, { tags, ...args }) => {
     requireE2E();
-    return await tenki.fork(ctx, args);
+    return await tenki.fork(ctx, { ...args, options: { tags } });
   },
 });
 

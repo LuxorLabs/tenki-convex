@@ -112,9 +112,10 @@ Every method takes the action `ctx` and the sandbox's `{ ownerId, key }`.
 
 ### Lifecycle
 
-- `create({ options? })` returns the sandbox, creating it if needed. `options`
-  takes any `@tenkicloud/sandbox` create option: resources, image, template,
-  env, `allowDomains`, `maxDurationMs`, `snapshotId`, ...
+- `create({ options? })` returns the sandbox, creating it if needed. If a
+  concurrent call for the same identity fails, this one throws the same error.
+  `options` takes any `@tenkicloud/sandbox` create option: resources, image,
+  template, env, `allowDomains`, `maxDurationMs`, `snapshotId`, ...
 - `pause({ wait? })` keeps memory and disk, so processes resume where they left
   off. It takes tens of seconds; with `wait: false` it returns `pausing` and a
   later `refresh` sees `paused`.
@@ -163,12 +164,22 @@ Errors are `ConvexError`s with a `code`:
 | `terminated`                                             | The sandbox is gone; the row is now `terminated`.                             |
 | `invalid_state`                                          | Tenki refused the call in the sandbox's current state; the row was re-synced. |
 | `insufficient_credits`                                   | The Tenki workspace's balance is empty.                                       |
+| `capacity_exceeded`                                      | `maxActiveSandboxes` is reached; try again later.                             |
+| `pause_failed`, `resume_failed`                          | Tenki couldn't pause or resume; the row was re-synced from Tenki.             |
+| `provisioning_timeout`                                   | A concurrent `create` of the same identity is still provisioning.             |
 | `file_not_found`                                         | `readFile` on a missing path.                                                 |
 | `unauthenticated`                                        | `TENKI_API_KEY` is missing or invalid.                                        |
 | `quota_exceeded`, `rate_limited`, `capacity_unavailable` | Tenki limits; retry later.                                                    |
 
 A failed `create` also records the error on the row (`phase: "error"` and
 `lastError`), and the next `create` retries.
+
+## Limiting spend
+
+`new Tenki(components.tenki, { maxActiveSandboxes: 20 })` refuses to start a
+sandbox once 20 are active (not paused) across all owners, counting creates in
+flight. The check runs in the same transaction that reserves the row, so
+concurrent creates and forks can't exceed it.
 
 ## Lifetime
 

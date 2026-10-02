@@ -27,9 +27,16 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       claim: FunctionReference<
         "mutation",
         "internal",
-        { key: string; leaseMs: number; ownerId: string; token: string },
+        {
+          key: string;
+          leaseMs: number;
+          maxActive?: number;
+          ownerId: string;
+          token: string;
+        },
         {
           claimed: boolean;
+          full?: boolean;
           sandbox: {
             _creationTime: number;
             _id: string;
@@ -56,7 +63,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
             };
             sessionId?: string;
             updatedAt: number;
-          };
+          } | null;
         },
         Name
       >;
@@ -354,6 +361,13 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           sessionId?: string;
           updatedAt: number;
         } | null,
+        Name
+      >;
+      touch: FunctionReference<
+        "mutation",
+        "internal",
+        { key: string; ownerId: string; sessionId: string },
+        null,
         Name
       >;
     };

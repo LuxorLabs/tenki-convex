@@ -39,6 +39,11 @@ export class FakeSdk implements SandboxClient {
   snapshots: { sessionId: string; options?: CreateSnapshotOptions }[] = [];
   createDelayMs = 0;
   failCreate?: Error;
+  /** Thrown by `create` after the session exists, carrying it like WaitReadyFailedError. */
+  failCreateAfterSession?: string;
+  failWaitReady?: Error;
+  failPause?: Error;
+  failResume?: Error;
   execResult: ExecReply = {
     exitCode: 0,
     stdout: text("ok\n"),
@@ -66,6 +71,18 @@ export class FakeSdk implements SandboxClient {
     if (this.createDelayMs)
       await new Promise((r) => setTimeout(r, this.createDelayMs));
     if (this.failCreate) throw this.failCreate;
+    if (this.failCreateAfterSession) {
+      const stuck = this.make(
+        this.nextId(),
+        options.tags ?? [],
+        options.metadata ?? {},
+        "CREATING",
+      );
+      this.sessions.set(stuck.id, stuck);
+      throw Object.assign(sdkError(this.failCreateAfterSession), {
+        session: stuck,
+      });
+    }
     const session = this.make(
       this.nextId(),
       options.tags ?? [],
@@ -137,9 +154,12 @@ export class FakeSdk implements SandboxClient {
         session.state = "TERMINATING";
       },
       async waitReady() {
+        if (sdk().failWaitReady) throw sdk().failWaitReady;
         session.state = "RUNNING";
       },
       async pause() {
+        // A failed pause reverts the session to RUNNING, as PauseFailedError reports.
+        if (sdk().failPause) throw sdk().failPause;
         session.state = "PAUSING";
       },
       async waitPaused() {
@@ -152,6 +172,11 @@ export class FakeSdk implements SandboxClient {
         session.state = "RESUMING";
       },
       async waitResumed() {
+        // A failed resume leaves the session stopped, as ResumeFailedError reports.
+        if (sdk().failResume) {
+          session.state = "PAUSED";
+          throw sdk().failResume;
+        }
         session.state = "RUNNING";
       },
       async extend(ms) {

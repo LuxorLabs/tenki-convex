@@ -6,9 +6,11 @@ import { action, type ActionCtx } from "./_generated/server.js";
 import { components } from "./_generated/api.js";
 
 // Guard rails for a public demo: short-lived, small, egress limited to package
-// registries, and a cap on live sandboxes across all visitors.
+// registries, and a cap on active sandboxes across all visitors (forks included).
 const DEMO_LIFETIME_MS = 10 * 60_000;
-const MAX_LIVE_SANDBOXES = Number(process.env.DEMO_MAX_LIVE_SANDBOXES ?? 10);
+const MAX_ACTIVE_SANDBOXES = Number(
+  process.env.DEMO_MAX_ACTIVE_SANDBOXES ?? 10,
+);
 const MAX_COMMAND_CHARS = 2_000;
 const EXEC_TIMEOUT_MS = 60_000;
 const PREVIEW_PORT = 8000;
@@ -21,6 +23,7 @@ const tenki = new Tenki(components.tenki, {
     allowDomains: ["pypi.org", "files.pythonhosted.org", "registry.npmjs.org"],
     tags: ["convex-demo"],
   },
+  maxActiveSandboxes: MAX_ACTIVE_SANDBOXES,
 });
 
 const sandboxKey = v.union(v.literal("main"), v.literal("fork"));
@@ -38,26 +41,8 @@ async function ownerId(ctx: ActionCtx): Promise<string> {
 
 export const create = action({
   args: {},
-  handler: async (ctx) => {
-    const owner = await ownerId(ctx);
-    const existing = await tenki.get(ctx, { ownerId: owner, key: "main" });
-    if (
-      !existing ||
-      existing.phase === "terminated" ||
-      existing.phase === "error"
-    ) {
-      const live = await ctx.runQuery(components.tenki.sandboxes.stale, {
-        limit: MAX_LIVE_SANDBOXES,
-      });
-      if (live.length >= MAX_LIVE_SANDBOXES) {
-        throw new ConvexError({
-          code: "demo_full",
-          message: "The demo is at capacity. Try again in a few minutes.",
-        });
-      }
-    }
-    return await tenki.create(ctx, { ownerId: owner, key: "main" });
-  },
+  handler: async (ctx) =>
+    await tenki.create(ctx, { ownerId: await ownerId(ctx), key: "main" }),
 });
 
 export const run = action({

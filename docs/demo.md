@@ -28,8 +28,10 @@ The demo is meant to be public, so `demo.ts` limits what a visitor can do:
 - **Egress:** only `pypi.org`, `files.pythonhosted.org` and `registry.npmjs.org`
   are reachable.
 - **Sandboxes per visitor:** one main sandbox and one fork.
-- **Global cap:** a new sandbox is refused once `DEMO_MAX_LIVE_SANDBOXES` are
-  live across all visitors (default 10).
+- **Global cap:** a new sandbox or fork is refused once
+  `DEMO_MAX_ACTIVE_SANDBOXES` are active across all visitors (default 10). The
+  count includes creates in flight and is checked in the same transaction that
+  reserves the sandbox.
 - **Commands:** at most 2,000 characters, a 60-second timeout and 64 KiB of
   output.
 
@@ -53,7 +55,7 @@ Then open http://localhost:5173.
 1. Deploy the backend to a dedicated Convex project: `npx convex deploy`.
 2. On that deployment, set:
    - `TENKI_API_KEY`
-   - `DEMO_MAX_LIVE_SANDBOXES`
+   - `DEMO_MAX_ACTIVE_SANDBOXES`
    - the Convex Auth keys, with
      `node scripts/setup-demo-auth.mjs https://<frontend-host>`
 3. Do not set `TENKI_E2E`.

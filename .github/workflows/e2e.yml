@@ -8,10 +8,12 @@ on:
     - cron: "17 7 * * *"
   workflow_dispatch:
 
-# The Tenki test workspace caps concurrent sandboxes, so runs never overlap.
+# One group per event and ref: a newer push supersedes its own pending run, and
+# runs for different refs proceed. A run keeps at most 2 sandboxes alive, so two
+# overlapping runs fit the Test workspace's 5 active sandboxes.
 concurrency:
-  group: e2e
-  cancel-in-progress: false
+  group: e2e-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   e2e:

@@ -42,7 +42,9 @@ export function phaseFromState(state: string): Phase {
       return "paused";
     case "RESUMING":
       return "resuming";
+    // The SDK treats a guest-initiated shutdown as stopped but resumable.
     case "USER_SHUTDOWN":
+      return "paused";
     case "TERMINATING":
     case "TERMINATED":
       return "terminated";
@@ -116,6 +118,9 @@ const ERROR_CODES: Record<string, string> = {
   SnapshotFailedError: "snapshot_failed",
   SnapshotWaitTimeoutError: "snapshot_failed",
   ResumeFailedError: "resume_failed",
+  PauseFailedError: "pause_failed",
+  WaitReadyFailedError: "not_ready",
+  TemplateRuntimeFailedError: "runtime_failed",
   PortLimitExceededError: "port_limit_exceeded",
   InboundDisabledError: "inbound_disabled",
 };
@@ -138,30 +143,42 @@ export function isGone(err: unknown): boolean {
   return code === "not_found" || code === "terminated";
 }
 
-// Background processes outlive the exec that starts them; their state lives under
-// $HOME because a pause wipes /tmp. Inputs arrive via env, never interpolated.
-const PROC_ROOT = '"$HOME/.tenki-convex/proc/$TENKI_CVX_ID"';
+// Background processes outlive the exec that starts them. Their state lives under
+// the user's passwd home (a caller's HOME override can't move it), not /tmp, which
+// the SDK documents as cleared across a pause. Inputs arrive via env, never
+// interpolated. A pid only counts as ours if its start time matches the one
+// recorded at spawn, so a pid reused after a restart is never reported or signaled.
+const PRELUDE = `home=$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)
+D="\${home:-$HOME}/.tenki-convex/proc/$TENKI_CVX_ID"
+start_of() { sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f20; }
+alive() {
+  p=$(cat "$D/pid" 2>/dev/null) || return 1
+  s=$(start_of "$p")
+  [ -n "$s" ] && [ "$s" = "$(cat "$D/start" 2>/dev/null)" ]
+}`;
 
 export const SPAWN_SCRIPT = `set -e
-D=${PROC_ROOT}
+${PRELUDE}
 mkdir -p "$D"
 export TENKI_CVX_DIR="$D"
-setsid nohup bash -c 'cmd=$TENKI_CVX_CMD; dir=$TENKI_CVX_DIR; unset TENKI_CVX_CMD TENKI_CVX_DIR TENKI_CVX_ID; bash -lc "$cmd"; echo $? > "$dir/exit"' > "$D/log" 2>&1 < /dev/null &
-echo $! > "$D/pid"
-echo $!`;
+setsid nohup bash -c 'cmd=$TENKI_CVX_CMD; dir=$TENKI_CVX_DIR; unset TENKI_CVX_CMD TENKI_CVX_DIR TENKI_CVX_ID; bash -lc "$cmd"; echo $? > "$dir/exit.tmp"; mv "$dir/exit.tmp" "$dir/exit"' > "$D/log" 2>&1 < /dev/null &
+pid=$!
+echo "$pid" > "$D/pid"
+start_of "$pid" > "$D/start" || true
+echo "$pid"`;
 
-export const STATUS_SCRIPT = `D=${PROC_ROOT}
+export const STATUS_SCRIPT = `${PRELUDE}
 [ -d "$D" ] || { echo missing; exit 0; }
 size=$(wc -c < "$D/log" | tr -d ' ')
 if [ -f "$D/exit" ]; then echo "exited $(cat "$D/exit") $size"
-elif kill -0 "$(cat "$D/pid")" 2>/dev/null; then echo "running - $size"
+elif alive; then echo "running - $size"
 elif [ -f "$D/signal" ]; then echo "killed $(cat "$D/signal") $size"
 else echo "lost - $size"; fi
 tail -c "$TENKI_CVX_TAIL" "$D/log"`;
 
-export const KILL_SCRIPT = `D=${PROC_ROOT}
+export const KILL_SCRIPT = `${PRELUDE}
 [ -f "$D/pid" ] || { echo missing; exit 0; }
-if kill -s "$TENKI_CVX_SIGNAL" -- "-$(cat "$D/pid")" 2>/dev/null; then
+if alive && kill -s "$TENKI_CVX_SIGNAL" -- "-$(cat "$D/pid")" 2>/dev/null; then
   echo "$TENKI_CVX_SIGNAL" > "$D/signal"; echo signaled
 else echo gone; fi`;
 
@@ -175,6 +192,13 @@ export function parseStatus(stdout: string, tailBytes: number) {
   if (state === "missing")
     return { state: "missing" as const, output: "", outputTruncated: false };
   const output = newline === -1 ? "" : stdout.slice(newline + 1);
+  if (state === "exited" && !/^\d+$/.test(exit ?? "")) {
+    return {
+      state: "running" as const,
+      output,
+      outputTruncated: Number(size) > tailBytes,
+    };
+  }
   return {
     state: state as ProcessState,
     ...(state === "exited" ? { exitCode: Number(exit) } : {}),
