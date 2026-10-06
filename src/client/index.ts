@@ -143,8 +143,9 @@ const DEFAULT_MAX_OUTPUT_BYTES = 1 << 20;
 const DEFAULT_TAIL_BYTES = 64 << 10;
 // Convex's return value limit.
 const DEFAULT_MAX_READ_BYTES = 16 << 20;
-// Outlasts Convex's 10-minute action limit, so a lease only lapses once its holder is gone.
-const CREATE_LEASE_MS = 10 * 60_000;
+// A slow create can outlive its lease; the next caller then takes over and adopts
+// the same tagged session, and `releasable` keeps the old holder from closing it.
+const CREATE_LEASE_MS = 5 * 60_000;
 // Template-spec creates otherwise wait up to 2 hours for readiness.
 const MAX_CREATE_WAIT_MS = 8 * 60_000;
 const WAIT_FOR_PEER_MS = 3 * 60_000;
@@ -392,8 +393,9 @@ export class Tenki {
     const requested = Math.floor(
       args.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,
     );
+    // head needs a plain integer, which String() stops giving above 1e21.
     const maxOutputBytes = Number.isFinite(requested)
-      ? Math.max(0, requested)
+      ? Math.min(Math.max(0, requested), Number.MAX_SAFE_INTEGER - 1)
       : DEFAULT_MAX_OUTPUT_BYTES;
     const argv = cappedArgv(toArgv(args.command), maxOutputBytes + 1);
     return await this.withSession(ctx, args, async (session) => {

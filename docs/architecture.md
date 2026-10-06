@@ -47,12 +47,13 @@ retried, called concurrently, or killed halfway. `CreateSession` has no
 idempotency key, so three layers do the work:
 
 1. **Lease.** The `claim` mutation inserts the row as `provisioning` with a
-   token and a 10-minute lease, or reports the current holder. The lease
-   outlasts Convex's 10-minute action limit, and readiness waits are capped at 8
-   minutes, so it only lapses once its holder is gone. Convex runs mutations
-   serializably, so exactly one caller holds the lease. Other callers wait for
-   the row to leave `provisioning`. A terminated or failed row is reclaimed so
-   the key can be reused.
+   token and a 5-minute lease, or reports the current holder. Readiness waits
+   are capped at 8 minutes, so a slow create can outlive its lease; the next
+   caller then takes over and adopts the same tagged session, and the old holder
+   leaves that session alone. Convex runs mutations serializably, so exactly one
+   caller holds the lease. Other callers wait for the row to leave
+   `provisioning`. A terminated or failed row is reclaimed so the key can be
+   reused.
 2. **Adoption tag.** Every session is tagged
    `cvx:<sha256(namespace, ownerId, key)[:28]>`. Before creating, the lease
    holder lists sessions with that tag and adopts a live one. That recovers from

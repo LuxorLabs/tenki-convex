@@ -154,7 +154,7 @@ const RPC_CODES: Record<string, string> = {
 const RPC_CODE = /^\[([a-z_]+)\]/;
 // The SDK's readiness waits throw plain Errors.
 const TERMINAL = /session entered terminal state/;
-const WAIT_TIMEOUT = /^timeout waiting for session/;
+const WAIT_TIMEOUT = /timeout waiting for session/;
 
 // Tenki reports an empty balance as a generic failed_precondition.
 const NO_CREDITS = /balance is empty|top up/i;

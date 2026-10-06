@@ -933,6 +933,28 @@ describe("create on an existing sandbox", () => {
 describe("limits", () => {
   const capped = { maxActiveSandboxes: 1 };
 
+  test("a create's lease lasts 5 minutes", async () => {
+    const t = initConvexTest();
+    let leaseMs = 0;
+    fake.onCreate = async () => {
+      leaseMs = (await row(t))!.claim!.expiresAt - Date.now();
+    };
+    await t.action(api.create, alice);
+    expect(leaseMs).toBeGreaterThan(4 * 60_000);
+    expect(leaseMs).toBeLessThanOrEqual(5 * 60_000);
+  });
+
+  test("a huge maxOutputBytes reaches head as a plain integer", async () => {
+    const t = initConvexTest();
+    const { sessionId } = await t.action(api.create, alice);
+    await t.action(api.exec, {
+      ...alice,
+      command: ["true"],
+      maxOutputBytes: Number.MAX_VALUE,
+    });
+    expect(fake.sessions.get(sessionId!)!.argv[0][4]).toMatch(/^\d+$/);
+  });
+
   test("a create that destroy cancels keeps its slot until it winds down", async () => {
     const t = initConvexTest();
     let open!: () => void;
@@ -1097,6 +1119,14 @@ describe("errors", () => {
       "terminated",
     );
     expect(code(sdkError("SnapshotNotFoundError"))).toBe("snapshot_not_found");
+    expect(
+      code(
+        sdkError(
+          "SandboxError",
+          "[unknown] timeout waiting for session s1 to become ready",
+        ),
+      ),
+    ).toBe("timeout");
     expect(code(new Error("boom"))).toBe("internal");
   });
 
