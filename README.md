@@ -131,9 +131,10 @@ Every method takes the action `ctx` and the sandbox's `{ ownerId, key }`.
   lists them. A snapshot without `expiresAt` is kept until you delete it in
   Tenki.
 - `fork({ ownerId, from, to })` snapshots `from` and creates `to` from it. The
-  two then run independently. It throws `already_exists` while `to` is live. The
-  fork's snapshot expires after an hour, and Tenki deletes it once no sandbox
-  uses it.
+  two then run independently. It throws `already_exists` while `to` is live or
+  being created, and checks `maxActiveSandboxes`, before taking the snapshot.
+  The fork's snapshot expires after an hour, and Tenki deletes it once no
+  sandbox uses it.
 - `refresh()` re-reads the sandbox from Tenki.
 - `destroy()` terminates it, and a `create` still in flight for it fails with
   `terminated`. The key can then be reused.

@@ -215,36 +215,15 @@ export class Tenki {
     args: Identity & { options?: CreateSandboxOptions; resume?: boolean },
   ): Promise<Sandbox> {
     const identity = pick(args);
-    const extraTags = [
-      ...(this.options.defaults?.tags ?? []),
-      ...(args.options?.tags ?? []),
-    ];
-    // Tenki trims and lowercases tags, so only an already-valid tag can be checked for the prefix.
-    const bad = extraTags.find(
-      (t) => !TAG_PATTERN.test(t) || t.toLowerCase().startsWith(TAG_PREFIX),
-    );
-    if (bad !== undefined) {
-      throw new ConvexError({
-        code: "invalid_argument",
-        message: `tag ${JSON.stringify(bad)} must match ${TAG_PATTERN} and not start with "${TAG_PREFIX}"`,
-      });
-    }
+    const tags = this.extraTags(args.options);
     for (let attempt = 0; ; attempt++) {
       const token = crypto.randomUUID();
-      const { claimed, full, sandbox } = await ctx.runMutation(
-        this.component.sandboxes.claim,
-        {
-          ...identity,
-          token,
-          leaseMs: CREATE_LEASE_MS,
-          maxActive: this.options.maxActiveSandboxes,
-        },
-      );
+      const { claimed, full, sandbox } = await this.claim(ctx, identity, token);
       if (full) throw capacityExceeded();
       if (claimed) {
         return await this.provision(ctx, identity, token, {
           ...args.options,
-          tags: extraTags,
+          tags,
         });
       }
       const current = leased(sandbox!)
@@ -260,6 +239,34 @@ export class Tenki {
       if (usable) return usable;
       if (attempt > 0) return current;
     }
+  }
+
+  private async claim(ctx: ActionCtx, identity: Identity, token: string) {
+    return await ctx.runMutation(this.component.sandboxes.claim, {
+      ...identity,
+      token,
+      leaseMs: CREATE_LEASE_MS,
+      maxActive: this.options.maxActiveSandboxes,
+    });
+  }
+
+  /** The defaults' and the caller's tags. */
+  private extraTags(options?: CreateSandboxOptions): string[] {
+    const tags = [
+      ...(this.options.defaults?.tags ?? []),
+      ...(options?.tags ?? []),
+    ];
+    // Tenki trims and lowercases tags, so only an already-valid tag can be checked for the prefix.
+    const bad = tags.find(
+      (t) => !TAG_PATTERN.test(t) || t.toLowerCase().startsWith(TAG_PREFIX),
+    );
+    if (bad !== undefined) {
+      throw new ConvexError({
+        code: "invalid_argument",
+        message: `tag ${JSON.stringify(bad)} must match ${TAG_PATTERN} and not start with "${TAG_PREFIX}"`,
+      });
+    }
+    return tags;
   }
 
   /** Creates or adopts the identity's session under the lease `token` holds. */
@@ -667,8 +674,9 @@ export class Tenki {
 
   /**
    * Snapshots `from` and creates `to` from it. Both sandboxes keep running
-   * independently. Throws `already_exists` while `to` is live. The snapshot
-   * expires after an hour; Tenki deletes it once no sandbox uses it.
+   * independently. Throws `already_exists` while `to` is live or being created,
+   * before taking the snapshot. The snapshot expires after an hour; Tenki
+   * deletes it once no sandbox uses it.
    */
   async fork(
     ctx: ActionCtx,
@@ -680,23 +688,38 @@ export class Tenki {
       options?: CreateSandboxOptions;
     },
   ) {
-    const target = await this.get(ctx, { ownerId: args.ownerId, key: args.to });
-    if (target && target.phase !== "terminated" && target.phase !== "error") {
+    const target = { ownerId: args.ownerId, key: args.to };
+    const tags = this.extraTags(args.options);
+    // Reserving the target first means a refused or losing fork never pays for a snapshot.
+    const token = crypto.randomUUID();
+    const { claimed, full } = await this.claim(ctx, target, token);
+    if (full) throw capacityExceeded();
+    if (!claimed) {
       throw new ConvexError({
         code: "already_exists",
         message: `sandbox "${args.to}" already exists; destroy it first`,
       });
     }
-    const snap = await this.snapshot(ctx, {
-      ownerId: args.ownerId,
-      key: args.from,
-      name: args.name,
-      expiresAt: new Date(Date.now() + FORK_SNAPSHOT_TTL_MS),
-    });
-    return await this.create(ctx, {
-      ownerId: args.ownerId,
-      key: args.to,
-      options: { ...args.options, snapshotId: snap.snapshotId },
+    let snapshotId: string;
+    try {
+      ({ snapshotId } = await this.snapshot(ctx, {
+        ownerId: args.ownerId,
+        key: args.from,
+        name: args.name,
+        expiresAt: new Date(Date.now() + FORK_SNAPSHOT_TTL_MS),
+      }));
+    } catch (err) {
+      await ctx.runMutation(this.component.sandboxes.fail, {
+        ...target,
+        token,
+        ...describeError(err),
+      });
+      throw toConvexError(err);
+    }
+    return await this.provision(ctx, target, token, {
+      ...args.options,
+      tags,
+      snapshotId,
     });
   }
 

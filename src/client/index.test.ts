@@ -987,6 +987,45 @@ describe("limits", () => {
 });
 
 describe("fork", () => {
+  test("a fork refused at the cap takes no snapshot", async () => {
+    const t = initConvexTest();
+    const capped = { maxActiveSandboxes: 1 };
+    await call(t, "create", {}, capped);
+    for (let i = 0; i < 3; i++) {
+      expect(
+        await convexErrorData(
+          call(t, "fork", { from: "main", to: "fork" }, capped),
+        ),
+      ).toMatchObject({ code: "capacity_exceeded" });
+    }
+    expect(fake.snapshots).toHaveLength(0);
+  });
+
+  test("concurrent forks into one target take one snapshot", async () => {
+    const t = initConvexTest();
+    await t.action(api.create, alice);
+    const results = await Promise.allSettled(
+      [1, 2, 3].map(() => call(t, "fork", { from: "main", to: "fork" })),
+    );
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect(fake.snapshots).toHaveLength(1);
+  });
+
+  test("a create of the target during a fork gets the forked sandbox", async () => {
+    const t = initConvexTest();
+    await t.action(api.create, alice);
+    const realSnapshot = fake.createSnapshotAndWait.bind(fake);
+    let racing: Promise<{ sessionId?: string }> | undefined;
+    fake.createSnapshotAndWait = async (id, options) => {
+      racing = call(t, "create", { key: "fork" });
+      await new Promise((r) => setTimeout(r, 50));
+      return await realSnapshot(id, options);
+    };
+    const forked = await call(t, "fork", { from: "main", to: "fork" });
+    expect((await racing!).sessionId).toBe(forked.sessionId);
+    expect(fake.creates.at(-1)).toMatchObject({ snapshotId: "snap-1" });
+  });
+
   test("refuses a live target and expires its snapshot", async () => {
     const t = initConvexTest();
     await t.action(api.create, alice);
