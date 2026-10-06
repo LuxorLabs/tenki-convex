@@ -769,12 +769,28 @@ describe("create on an existing sandbox", () => {
 
   test("tags in the reserved cvx: prefix are refused", async () => {
     const t = initConvexTest();
-    expect(
-      await convexErrorData(
-        t.action(api.create, { ...alice, tags: ["CVX:0123"] }),
-      ),
-    ).toMatchObject({ code: "invalid_argument" });
+    // Tenki trims and lowercases tags, so padded forms would become cvx: tags too.
+    for (const tag of [
+      "CVX:0123",
+      " cvx:0123",
+      "\tcvx:0123",
+      " cvx:0123",
+      "\u0085cvx:0123",
+    ]) {
+      expect(
+        await convexErrorData(t.action(api.create, { ...alice, tags: [tag] })),
+      ).toMatchObject({ code: "invalid_argument" });
+    }
     expect(await row(t)).toBeNull();
+    expect(
+      (
+        await t.action(api.create, {
+          ...alice,
+          tags: ["Team-A", "cvx-e2e:run1"],
+        })
+      ).phase,
+    ).toBe("ready");
+    expect(fake.creates[0].tags).toContain("Team-A");
   });
 
   test("destroy during a create cancels it and closes its session", async () => {

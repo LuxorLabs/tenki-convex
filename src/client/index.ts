@@ -156,6 +156,7 @@ const SETTLE_WAIT_MS = 2 * 60_000;
 const NOT_FOUND_RETRY_MS = 1_000;
 const FORK_SNAPSHOT_TTL_MS = 60 * 60_000;
 const SESSION_CACHE_LIMIT = 64;
+const TAG_PATTERN = /^[a-z0-9][a-z0-9_:.-]*$/i;
 const SIGNALS: readonly Signal[] = ["TERM", "KILL", "INT", "HUP"];
 // A snapshot brings its own machine, so these defaults are skipped when restoring one.
 const SOURCE_OPTIONS = [
@@ -218,10 +219,14 @@ export class Tenki {
       ...(this.options.defaults?.tags ?? []),
       ...(args.options?.tags ?? []),
     ];
-    if (extraTags.some((t) => t.toLowerCase().startsWith(TAG_PREFIX))) {
+    // Tenki trims and lowercases tags, so only an already-valid tag can be checked for the prefix.
+    const bad = extraTags.find(
+      (t) => !TAG_PATTERN.test(t) || t.toLowerCase().startsWith(TAG_PREFIX),
+    );
+    if (bad !== undefined) {
       throw new ConvexError({
         code: "invalid_argument",
-        message: `tags starting with "${TAG_PREFIX}" are reserved`,
+        message: `tag ${JSON.stringify(bad)} must match ${TAG_PATTERN} and not start with "${TAG_PREFIX}"`,
       });
     }
     for (let attempt = 0; ; attempt++) {

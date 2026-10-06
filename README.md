@@ -119,7 +119,8 @@ Every method takes the action `ctx` and the sandbox's `{ ownerId, key }`.
   `@tenkicloud/sandbox` create option: resources, image, template, env,
   `allowDomains`, `maxDurationMs`, `snapshotId`, ... With `snapshotId`, the size
   comes from the snapshot and the `defaults` for image, template and resources
-  are skipped. Tags starting with `cvx:` are reserved.
+  are skipped. Tags must be valid Tenki tags (`[a-z0-9][a-z0-9_:.-]*`), and the
+  `cvx:` prefix is reserved.
 - `pause({ wait? })` keeps memory and disk, so processes resume where they left
   off. It takes tens of seconds; with `wait: false` it returns `pausing` and a
   later `refresh` sees `paused`.
