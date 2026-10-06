@@ -23,12 +23,14 @@ without polling.
 
 The demo is meant to be public, so `demo.ts` limits what a visitor can do:
 
-- **Lifetime:** every sandbox lasts 10 minutes.
+- **Lifetime:** every sandbox lasts 10 minutes. Tenki pauses it at the deadline,
+  and resuming would start a new lifetime, so the demo refuses to resume a
+  sandbox older than 10 minutes and replaces it on the next start.
 - **Size:** 2 vCPU and 2 GB.
 - **Egress:** only `pypi.org`, `files.pythonhosted.org` and `registry.npmjs.org`
   are reachable.
 - **Sandboxes per visitor:** one main sandbox and one fork.
-- **Global cap:** a new sandbox or fork is refused once
+- **Global cap:** a new sandbox, fork or resume is refused once
   `DEMO_MAX_ACTIVE_SANDBOXES` are active across all visitors (default 10). The
   count includes creates in flight and is checked in the same transaction that
   reserves the sandbox.
