@@ -38,7 +38,7 @@ on a running Convex deployment against real Tenki. It covers:
   preview URLs
 - extend, pause/resume, kill, fork (and fork into a live target), reconcile, and
   destroy with key reuse
-- an `exec` that prints 200 MB, capped in the sandbox
+- an `exec` that prints 200 MB, capped in the sandbox, and one that times out
 
 With `E2E_SLOW=1` it also lets a 60-second sandbox reach its real deadline,
 checks that `reconcile` catches the row up, and that `create` brings it back.

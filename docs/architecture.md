@@ -117,10 +117,13 @@ minutes.
 
 The SDK holds a command's whole output in memory, including through `run()`, so
 output is capped in the guest: every command runs under a fixed `bash -c` script
-that pipes each stream through `head -c` and drains the rest, with `pipefail`
-keeping the command's exit code. The client asks for one byte more than
-`maxOutputBytes` (1 MiB by default) so it can flag truncation. The result fits
-in a Convex value, and a command that prints gigabytes costs the action nothing.
+that points its stdout and stderr at `head -c` processes that drain the rest,
+then `exec`s the command. The guest agent signals only the process it started,
+so the command has to be that process: its timeout then reaches the command, and
+its exit status and signal are reported as before. The client asks for one byte
+more than `maxOutputBytes` (1 MiB by default) so it can flag truncation. The
+result fits in a Convex value, and a command that prints gigabytes costs the
+action nothing.
 
 ## Background processes
 

@@ -146,9 +146,9 @@ Every method takes the action `ctx` and the sandbox's `{ ownerId, key }`.
 
 - `exec({ command, cwd?, env?, timeoutMs?, maxOutputBytes? })` runs a command
   and waits. A string runs under `bash -lc`; an array runs as argv, without
-  shell parsing (both need `bash` in the image). Output is capped inside the
-  sandbox at `maxOutputBytes` per stream (1 MiB by default), and the timeout at
-  9 minutes, inside Convex's action limit.
+  shell parsing (both need `bash`, `head` and `cat` in the image). Output is
+  capped inside the sandbox at `maxOutputBytes` per stream (1 MiB by default),
+  and the timeout at 9 minutes, inside Convex's action limit.
 - `spawn({ command, cwd?, env? })` starts a background command and returns a
   `processId` at once. It keeps running after the action ends and across
   pause/resume.

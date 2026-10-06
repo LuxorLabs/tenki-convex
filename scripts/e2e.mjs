@@ -129,6 +129,28 @@ try {
   });
 
   await scenario(
+    "a timed-out exec ends its command and keeps its output",
+    async () => {
+      const started = Date.now();
+      const r = await exec(
+        alice,
+        "echo hi; exec -a e2e-timeout-probe sleep 60",
+        {
+          timeoutMs: 3000,
+        },
+      );
+      assert.equal(r.timedOut, true);
+      assert.equal(r.stdout, "hi\n");
+      assert.ok(
+        Date.now() - started < 15_000,
+        `took ${Date.now() - started}ms`,
+      );
+      const left = await exec(alice, "pgrep -f '[e]2e-timeout-probe' || true");
+      assert.equal(left.stdout, "");
+    },
+  );
+
+  await scenario(
     "concurrent creates for one identity make one sandbox",
     async () => {
       const carol = owner("carol");

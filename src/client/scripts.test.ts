@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -145,6 +145,42 @@ test("exec output is capped per stream inside the sandbox, keeping the exit code
   );
   expect(argv.stdout.toString()).toBe("a b");
 });
+
+test("a command that writes past the cap itself keeps its own exit code", () => {
+  const [bash, ...args] = cappedArgv(["head", "-c", "100000", "/dev/zero"], 5);
+  const r = spawnSync(bash, args);
+  expect(r.status).toBe(0);
+  expect(r.stdout.byteLength).toBe(5);
+});
+
+test("argv runs a program, never the wrapper's shell builtins", () => {
+  for (const argv of [["cap"], ["shopt"]]) {
+    const [bash, ...args] = cappedArgv(argv, 100);
+    expect(spawnSync(bash, args).status).toBe(127);
+  }
+});
+
+// The guest agent ends a timed-out command by signalling only the process it started.
+test("signalling the started process ends the command and keeps its output", async () => {
+  const marker = `tenki-cvx-test-${process.pid}`;
+  const [bash, ...args] = cappedArgv(
+    ["bash", "-c", `echo hi; exec -a ${marker} sleep 30`],
+    1 << 20,
+  );
+  const child = spawn(bash, args);
+  let out = "";
+  child.stdout.on("data", (b) => (out += b));
+  const closed = new Promise((r) => child.on("close", r));
+  await new Promise((r) => setTimeout(r, 500));
+  child.kill("SIGTERM");
+  const ended = await Promise.race([
+    closed.then(() => true),
+    new Promise((r) => setTimeout(() => r(false), 5000)),
+  ]);
+  const left = spawnSync("pgrep", ["-f", marker]).stdout.toString().trim();
+  if (left) spawnSync("pkill", ["-f", marker]);
+  expect({ ended, out, left }).toEqual({ ended: true, out: "hi\n", left: "" });
+}, 10_000);
 
 test("an exit file caught mid-write reads as still running", () => {
   expect(parseStatus("exited  12\nout", 100)).toMatchObject({

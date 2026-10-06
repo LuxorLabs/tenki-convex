@@ -102,13 +102,13 @@ export function toArgv(command: string | string[]): string[] {
 }
 
 // The SDK buffers a command's whole output in the action's memory, so the cap is
-// applied in the guest: each stream keeps its first $1 bytes and drains the rest,
-// and pipefail passes the command's exit code through.
-export const EXEC_SCRIPT = `set -o pipefail
-max=$1
+// applied in the guest: each stream keeps its first $1 bytes and drains the rest.
+// The command then replaces the shell, because the guest agent signals only the
+// process it started: its timeout must reach the command, not a wrapper.
+export const EXEC_SCRIPT = `max=$1
 shift
-cap() { head -c "$max"; cat > /dev/null; }
-{ { "$@" 2>&1 1>&3 3>&- | cap 1>&2 3>&-; } 3>&1 | cap; }`;
+exec > >(head -c "$max"; cat > /dev/null) 2> >(head -c "$max" >&2; cat > /dev/null)
+exec "$@"`;
 
 /** Runs `argv` with each output stream capped at `maxBytes` inside the sandbox. */
 export function cappedArgv(argv: string[], maxBytes: number): string[] {
