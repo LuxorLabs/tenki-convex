@@ -9,7 +9,7 @@ import {
   describeError,
   SPAWN_SCRIPT,
 } from "./internal.js";
-import { FakeSdk, sdkError, text } from "./fake.test.js";
+import { FakeSdk, sdkError, text, type FakeSession } from "./fake.test.js";
 import { components, initConvexTest } from "./setup.test.js";
 
 let fake = new FakeSdk();
@@ -723,7 +723,80 @@ describe("review fixes", () => {
   });
 });
 
+/** Makes a fake session resume the way Tenki does: only from PAUSED, and not instantly. */
+function resumeLikeTenki(s: FakeSession, resumeMs = 100) {
+  const wait = async (state: string) => {
+    for (let i = 0; i < 100 && s.state !== state; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    if (s.state !== state) throw new Error(`timeout waiting for ${state}`);
+  };
+  s.resume = async () => {
+    if (s.state === "RUNNING") return;
+    if (s.state !== "PAUSED") {
+      throw sdkError(
+        "InvalidStateError",
+        `[failed_precondition] cannot resume session in current state ${s.state}`,
+      );
+    }
+    s.state = "RESUMING";
+    setTimeout(() => (s.state = "RUNNING"), resumeMs);
+  };
+  s.waitResumed = async () => await wait("RUNNING");
+  s.waitPaused = async () => await wait("PAUSED");
+}
+
 describe("create on an existing sandbox", () => {
+  test("concurrent creates on a paused sandbox both get it ready", async () => {
+    const t = initConvexTest();
+    const { sessionId } = await t.action(api.create, alice);
+    await call(t, "pause");
+    resumeLikeTenki(fake.sessions.get(sessionId!)!);
+    const results = await Promise.all([
+      t.action(api.create, alice),
+      t.action(api.create, alice),
+    ]);
+    expect(results.map((r) => [r.phase, r.sessionId])).toEqual([
+      ["ready", sessionId],
+      ["ready", sessionId],
+    ]);
+  });
+
+  test("a create while Tenki is still pausing at the deadline waits and resumes", async () => {
+    const t = initConvexTest();
+    fake.lifetimeMs = 1;
+    const { sessionId } = await t.action(api.create, alice);
+    await new Promise((r) => setTimeout(r, 5));
+    const s = fake.sessions.get(sessionId!)!;
+    resumeLikeTenki(s);
+    s.state = "PAUSING";
+    setTimeout(() => (s.state = "PAUSED"), 300);
+    expect(await t.action(api.create, alice)).toMatchObject({
+      phase: "ready",
+      sessionId,
+    });
+    expect(s.state).toBe("RUNNING");
+  });
+
+  test("a resume whose first request was ambiguous still finishes", async () => {
+    const t = initConvexTest();
+    const { sessionId } = await t.action(api.create, alice);
+    await call(t, "pause");
+    const s = fake.sessions.get(sessionId!)!;
+    // Slower than the first retry, so the retry finds the session still RESUMING.
+    resumeLikeTenki(s, 3000);
+    const resume = s.resume;
+    let calls = 0;
+    s.resume = async () => {
+      await resume();
+      // Tenki committed RESUMING, then lost track of the dispatch.
+      if (++calls === 1)
+        throw sdkError("SandboxError", "[unavailable] resume dispatch failed");
+    };
+    expect((await call(t, "resume")).phase).toBe("ready");
+    expect((await row(t))?.phase).toBe("ready");
+  }, 15_000);
+
   test("resumes a paused sandbox, or returns it as is with resume: false", async () => {
     const t = initConvexTest();
     const { sessionId } = await t.action(api.create, alice);

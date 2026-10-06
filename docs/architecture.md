@@ -80,8 +80,8 @@ seen, `destroy` goes round again.
 
 **Existing rows.** A caller that finds a row already past `provisioning`
 re-reads it from Tenki unless it is `ready` with its deadline ahead. A paused
-row is resumed (unless `resume: false`), a `pausing` one first waits for
-`PAUSED`, and a terminated one is reclaimed and created anew.
+row is resumed (unless `resume: false`), and a terminated one is reclaimed and
+created anew.
 
 **Waiting on another caller.** A caller that finds another caller holding the
 lease waits for the row to leave `provisioning`. If that create failed, the
@@ -168,6 +168,10 @@ pause and resume, but not a guest-agent restart; it then reports `lost`.
   `resume` only marks the row `ready` after an `exec` of `true` succeeds. Right
   after a deadline pause, Tenki refuses a resume as `unavailable` until the old
   VM is torn down (about 30s in prod), so `resume` retries that for up to 90s.
+  Tenki also refuses a resume while the sandbox is `PAUSING` or already
+  `RESUMING`, so on `invalid_state` `resume` re-reads it: it waits for a pause
+  in flight to finish and retries, and it sends nothing more when another call
+  is already resuming it.
 - **Failures.** If pausing or resuming fails or times out, the row is re-synced
   from Tenki before the error is thrown, so it never stays `pausing` or
   `resuming`.

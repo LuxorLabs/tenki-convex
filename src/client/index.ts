@@ -357,16 +357,6 @@ export class Tenki {
     if (!sessionId) return sandbox;
     const expired = (sandbox.remote?.timeoutAt ?? Infinity) <= Date.now();
     if (sandbox.phase === "ready" && !expired) return sandbox;
-    // Let a pause or resume in flight settle first.
-    if (resume && sandbox.phase === "pausing") {
-      await this.session(sessionId)
-        .then((s) => s.waitPaused(SETTLE_WAIT_MS))
-        .catch(() => {});
-    } else if (resume && sandbox.phase === "resuming") {
-      await this.session(sessionId)
-        .then((s) => s.waitResumed(SETTLE_WAIT_MS))
-        .catch(() => {});
-    }
     const row =
       (await this.syncFromRemote(ctx, identity, sessionId)) ?? sandbox;
     if (row.phase === "terminated") return null;
@@ -629,7 +619,7 @@ export class Tenki {
         );
         if (full) throw capacityExceeded();
         try {
-          await retryUnavailable(() => session.resume(), RESUME_RETRY_MS);
+          await this.startResume(session);
           await session.waitResumed();
           await waitForExec(session, RESUME_READY_MS);
         } catch (err) {
@@ -882,6 +872,32 @@ export class Tenki {
     return session;
   }
 
+  /**
+   * Asks Tenki to resume. A session another call is already resuming needs no
+   * request, a pause in flight has to reach PAUSED first, and right after a
+   * deadline pause Tenki answers unavailable until the old VM is gone.
+   */
+  private async startResume(session: SandboxSession) {
+    const deadline = Date.now() + RESUME_RETRY_MS;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await session.resume();
+      } catch (err) {
+        const code = describeError(err).code;
+        if (Date.now() > deadline) throw err;
+        if (code === "invalid_state") {
+          const { state } = await this.getSession(session.id);
+          if (state === "RESUMING" || state === "RUNNING") return;
+          if (state !== "PAUSING") throw err;
+          await session.waitPaused(SETTLE_WAIT_MS).catch(() => {});
+          continue;
+        }
+        if (code !== "unavailable") throw err;
+      }
+      await sleep(Math.min(2_000 * 2 ** attempt, 10_000));
+    }
+  }
+
   /** GetSession can read a lagging replica, so one miss doesn't mean the session is gone. */
   private async getSession(sessionId: string): Promise<SandboxSession> {
     try {
@@ -973,19 +989,6 @@ async function waitForExec(session: SandboxSession, timeoutMs: number) {
         message: "sandbox did not answer after resume",
       });
     await sleep(1_000);
-  }
-}
-
-async function retryUnavailable(fn: () => Promise<void>, timeoutMs: number) {
-  const deadline = Date.now() + timeoutMs;
-  for (let attempt = 0; ; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      if (describeError(err).code !== "unavailable" || Date.now() > deadline)
-        throw err;
-    }
-    await sleep(Math.min(2_000 * 2 ** attempt, 10_000));
   }
 }
 
