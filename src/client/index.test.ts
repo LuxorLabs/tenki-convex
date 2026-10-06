@@ -884,6 +884,21 @@ describe("create on an existing sandbox", () => {
     fake.onCreate = undefined;
     expect((await t.action(api.create, alice)).phase).toBe("ready");
   });
+
+  test("a create waiting on one that destroy cancels gets a new sandbox", async () => {
+    const t = initConvexTest();
+    fake.createDelayMs = 200;
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const holder = convexErrorData(t.action(api.create, alice));
+    await sleep(30);
+    const waiter = t.action(api.create, alice);
+    await sleep(30);
+    await t.action(api.destroy, alice);
+    expect(await holder).toMatchObject({ code: "terminated" });
+    const sandbox = await waiter;
+    expect(sandbox.phase).toBe("ready");
+    expect(fake.sessions.get(sandbox.sessionId!)?.state).toBe("RUNNING");
+  });
 });
 
 describe("limits", () => {

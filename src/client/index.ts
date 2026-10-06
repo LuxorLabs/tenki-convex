@@ -353,6 +353,8 @@ export class Tenki {
     sandbox: Sandbox,
     resume: boolean,
   ): Promise<Sandbox | null> {
+    // Includes a create that destroy cancelled before it recorded a session.
+    if (sandbox.phase === "terminated") return null;
     const sessionId = sandbox.sessionId;
     if (!sessionId) return sandbox;
     const expired = (sandbox.remote?.timeoutAt ?? Infinity) <= Date.now();
