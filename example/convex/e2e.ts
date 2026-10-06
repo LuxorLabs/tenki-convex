@@ -1,7 +1,7 @@
 "use node";
 import { v } from "convex/values";
 import { Tenki } from "@tenkicloud/convex";
-import { action } from "./_generated/server.js";
+import { internalAction } from "./_generated/server.js";
 import { components } from "./_generated/api.js";
 import { requireE2E } from "./e2eGate.js";
 
@@ -9,11 +9,12 @@ const tenki = new Tenki(components.tenki, {
   defaults: { cpuCores: 2, memoryMb: 4096, maxDurationMs: 30 * 60_000 },
 });
 
-// Drives scripts/e2e.mjs. ownerId comes from the caller, so every function is
-// gated to test deployments; see demo.ts for the auth-derived version.
+// Drives scripts/e2e.mjs with an admin key. ownerId comes from the caller, so
+// every function is internal and also gated to test deployments; see demo.ts
+// for the auth-derived version.
 const identity = { ownerId: v.string(), key: v.string() };
 
-export const create = action({
+export const create = internalAction({
   args: { ...identity, tags: v.optional(v.array(v.string())) },
   handler: async (ctx, args) => {
     requireE2E();
@@ -25,11 +26,12 @@ export const create = action({
   },
 });
 
-export const exec = action({
+export const exec = internalAction({
   args: {
     ...identity,
     command: v.union(v.string(), v.array(v.string())),
     timeoutMs: v.optional(v.number()),
+    maxOutputBytes: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     requireE2E();
@@ -37,7 +39,7 @@ export const exec = action({
   },
 });
 
-export const spawn = action({
+export const spawn = internalAction({
   args: { ...identity, command: v.string() },
   handler: async (ctx, args) => {
     requireE2E();
@@ -45,7 +47,7 @@ export const spawn = action({
   },
 });
 
-export const processStatus = action({
+export const processStatus = internalAction({
   args: { ...identity, processId: v.string() },
   handler: async (ctx, args) => {
     requireE2E();
@@ -53,7 +55,7 @@ export const processStatus = action({
   },
 });
 
-export const kill = action({
+export const kill = internalAction({
   args: { ...identity, processId: v.string() },
   handler: async (ctx, args) => {
     requireE2E();
@@ -61,7 +63,7 @@ export const kill = action({
   },
 });
 
-export const readText = action({
+export const readText = internalAction({
   args: { ...identity, path: v.string() },
   handler: async (ctx, args) => {
     requireE2E();
@@ -69,7 +71,7 @@ export const readText = action({
   },
 });
 
-export const readBytes = action({
+export const readBytes = internalAction({
   args: { ...identity, path: v.string() },
   handler: async (ctx, args) => {
     requireE2E();
@@ -77,7 +79,7 @@ export const readBytes = action({
   },
 });
 
-export const writeFile = action({
+export const writeFile = internalAction({
   args: { ...identity, path: v.string(), data: v.union(v.string(), v.bytes()) },
   handler: async (ctx, args) => {
     requireE2E();
@@ -85,7 +87,7 @@ export const writeFile = action({
   },
 });
 
-export const exposePort = action({
+export const exposePort = internalAction({
   args: { ...identity, port: v.number() },
   handler: async (ctx, args) => {
     requireE2E();
@@ -93,7 +95,7 @@ export const exposePort = action({
   },
 });
 
-export const extend = action({
+export const extend = internalAction({
   args: { ...identity, additionalMs: v.number() },
   handler: async (ctx, args) => {
     requireE2E();
@@ -101,7 +103,7 @@ export const extend = action({
   },
 });
 
-export const pause = action({
+export const pause = internalAction({
   args: identity,
   handler: async (ctx, args) => {
     requireE2E();
@@ -109,7 +111,7 @@ export const pause = action({
   },
 });
 
-export const resume = action({
+export const resume = internalAction({
   args: identity,
   handler: async (ctx, args) => {
     requireE2E();
@@ -117,11 +119,12 @@ export const resume = action({
   },
 });
 
-export const fork = action({
+export const fork = internalAction({
   args: {
     ownerId: v.string(),
     from: v.string(),
     to: v.string(),
+    name: v.optional(v.string()),
     tags: v.optional(v.array(v.string())),
   },
   handler: async (ctx, { tags, ...args }) => {
@@ -130,7 +133,7 @@ export const fork = action({
   },
 });
 
-export const refresh = action({
+export const refresh = internalAction({
   args: identity,
   handler: async (ctx, args) => {
     requireE2E();
@@ -138,7 +141,7 @@ export const refresh = action({
   },
 });
 
-export const destroy = action({
+export const destroy = internalAction({
   args: identity,
   handler: async (ctx, args) => {
     requireE2E();
@@ -146,7 +149,7 @@ export const destroy = action({
   },
 });
 
-export const reconcile = action({
+export const reconcile = internalAction({
   args: {},
   handler: async (ctx) => {
     requireE2E();
@@ -154,7 +157,7 @@ export const reconcile = action({
   },
 });
 
-export const createWithBadKey = action({
+export const createWithBadKey = internalAction({
   args: identity,
   handler: async (ctx, args) => {
     requireE2E();
@@ -164,7 +167,7 @@ export const createWithBadKey = action({
   },
 });
 
-export const createShortLived = action({
+export const createShortLived = internalAction({
   args: { ...identity, maxDurationMs: v.number(), tags: v.array(v.string()) },
   handler: async (ctx, args) => {
     requireE2E();

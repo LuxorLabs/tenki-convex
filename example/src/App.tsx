@@ -188,14 +188,15 @@ function SandboxPanel({ sandbox, title }: { sandbox: Sandbox; title: string }) {
         </button>
       </div>
       {error && <p className="error">{error}</p>}
-      {sandbox.previews?.map((p) => (
-        <p key={p.port} className="preview">
-          Port {p.port} is live at{" "}
-          <a href={p.url} target="_blank" rel="noreferrer">
-            {p.url}
-          </a>
-        </p>
-      ))}
+      {ready &&
+        sandbox.previews?.map((p) => (
+          <p key={p.port} className="preview">
+            Port {p.port} is live at{" "}
+            <a href={p.url} target="_blank" rel="noreferrer">
+              {p.url}
+            </a>
+          </p>
+        ))}
       {ready && <Terminal sandboxKey={key} />}
     </section>
   );

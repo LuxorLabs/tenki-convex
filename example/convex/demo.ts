@@ -27,6 +27,20 @@ const tenki = new Tenki(components.tenki, {
 });
 
 const sandboxKey = v.union(v.literal("main"), v.literal("fork"));
+type Identity = { ownerId: string; key: "main" | "fork" };
+
+// Tenki pauses a sandbox at its deadline, and resuming it starts a new lifetime,
+// so the demo never resumes one older than DEMO_LIFETIME_MS.
+async function outlived(ctx: ActionCtx, identity: Identity) {
+  const sandbox = await tenki.get(ctx, identity);
+  if (!sandbox?.sessionId || sandbox.phase === "terminated") return false;
+  // Session ids are UUIDv7: the first 48 bits are the creation time in ms.
+  const createdAt = parseInt(
+    sandbox.sessionId.replaceAll("-", "").slice(0, 12),
+    16,
+  );
+  return Date.now() - createdAt > DEMO_LIFETIME_MS;
+}
 
 async function ownerId(ctx: ActionCtx): Promise<string> {
   const userId = await getAuthUserId(ctx);
@@ -41,8 +55,11 @@ async function ownerId(ctx: ActionCtx): Promise<string> {
 
 export const create = action({
   args: {},
-  handler: async (ctx) =>
-    await tenki.create(ctx, { ownerId: await ownerId(ctx), key: "main" }),
+  handler: async (ctx) => {
+    const identity: Identity = { ownerId: await ownerId(ctx), key: "main" };
+    if (await outlived(ctx, identity)) await tenki.destroy(ctx, identity);
+    return await tenki.create(ctx, identity);
+  },
 });
 
 export const run = action({
@@ -101,8 +118,16 @@ export const pause = action({
 
 export const resume = action({
   args: { key: sandboxKey },
-  handler: async (ctx, args) =>
-    await tenki.resume(ctx, { ownerId: await ownerId(ctx), key: args.key }),
+  handler: async (ctx, args) => {
+    const identity: Identity = { ownerId: await ownerId(ctx), key: args.key };
+    if (await outlived(ctx, identity)) {
+      throw new ConvexError({
+        code: "expired",
+        message: "This sandbox reached its 10-minute lifetime; destroy it",
+      });
+    }
+    return await tenki.resume(ctx, identity);
+  },
 });
 
 export const refresh = action({
