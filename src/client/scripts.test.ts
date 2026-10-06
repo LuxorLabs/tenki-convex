@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "vitest";
@@ -126,6 +126,58 @@ test.skipIf(!isLinux)(
       ).toBe("signaled");
       await settle();
       expect(status(id)).toMatchObject({ state: "killed", signal });
+    }
+  },
+);
+
+test.skipIf(!isLinux)(
+  "a record from before a restart never counts, even when its pid leads another spawn's group",
+  async () => {
+    const procHome = execFileSync("sh", [
+      "-c",
+      'getent passwd "$(id -u)" | cut -d: -f6',
+    ])
+      .toString()
+      .trim();
+    const run = (script: string, env: Record<string, string>) =>
+      execFileSync("bash", ["-c", script], {
+        env: { PATH: process.env.PATH, ...env },
+      }).toString();
+    const status = (id: string) =>
+      parseStatus(
+        run(STATUS_SCRIPT, { TENKI_CVX_ID: id, TENKI_CVX_TAIL: "100" }),
+        100,
+      );
+    const marker = `tenki-cvx-daemon-${process.pid}`;
+    const other = newProcessId();
+    run(SPAWN_SCRIPT, {
+      TENKI_CVX_ID: other,
+      TENKI_CVX_CMD: `exec -a ${marker} sleep 30 & exit 0`,
+    });
+    await new Promise((r) => setTimeout(r, 500));
+    const pid = readFileSync(
+      join(procHome, ".tenki-convex/proc", other, "pid"),
+      "utf8",
+    );
+    // A record written before a restart, whose pid now leads the other spawn's group.
+    const stale = newProcessId();
+    const dir = join(procHome, ".tenki-convex/proc", stale);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "pid"), pid);
+    writeFileSync(join(dir, "start"), "1\n");
+    writeFileSync(join(dir, "boot"), "00000000-0000-0000-0000-000000000000\n");
+    writeFileSync(join(dir, "log"), "");
+    try {
+      expect(status(stale)).toMatchObject({ state: "lost" });
+      expect(
+        run(KILL_SCRIPT, {
+          TENKI_CVX_ID: stale,
+          TENKI_CVX_SIGNAL: "TERM",
+        }).trim(),
+      ).toBe("gone");
+      expect(status(other)).toMatchObject({ state: "running" });
+    } finally {
+      spawnSync("pkill", ["-f", marker]);
     }
   },
 );

@@ -188,11 +188,14 @@ export function isGone(err: unknown): boolean {
 // recorded at spawn, so a pid reused after a restart is never reported or signaled.
 // Once that pid exits, anything it left in its process group (setsid made the pid
 // the group id, which Linux won't reuse while the group has members) still counts.
+// Nothing counts across a restart: the boot id must match the one recorded at spawn.
 const PRELUDE = `home=$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)
 D="\${home:-$HOME}/.tenki-convex/proc/$TENKI_CVX_ID"
 start_of() { sed -n 's/^.*) \\([^Z]\\)/\\1/p' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f20; }
+boot_id() { cat /proc/sys/kernel/random/boot_id 2>/dev/null; }
 alive() {
   p=$(cat "$D/pid" 2>/dev/null) || return 1
+  [ "$(cat "$D/boot" 2>/dev/null)" = "$(boot_id)" ] || return 1
   s=$(start_of "$p")
   if [ -n "$s" ]; then [ "$s" = "$(cat "$D/start" 2>/dev/null)" ]; return; fi
   for f in /proc/[0-9]*/stat; do
@@ -217,6 +220,7 @@ setsid $reset bash -c 'cmd=$TENKI_CVX_CMD; dir=$TENKI_CVX_DIR; unset TENKI_CVX_C
 pid=$!
 echo "$pid" > "$D/pid"
 start_of "$pid" > "$D/start" || true
+boot_id > "$D/boot" || true
 echo "$pid"`;
 
 export const STATUS_SCRIPT = `${PRELUDE}

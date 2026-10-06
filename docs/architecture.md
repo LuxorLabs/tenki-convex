@@ -138,7 +138,8 @@ exists the command starts with default signal handlers; elsewhere it falls back
 to `nohup`, and `INT` and `HUP` have no effect. Each process gets a directory,
 `<home>/.tenki-convex/proc/<processId>/`, holding:
 
-- `pid`, and `start`: the process start time read from `/proc/<pid>/stat`
+- `pid`, `start` (the process start time read from `/proc/<pid>/stat`) and
+  `boot` (the kernel's boot id)
 - `log` (combined stdout and stderr)
 - `exit` (written to a temp file and renamed into place when the command exits,
   so a status check never reads a half-written code)
@@ -151,7 +152,9 @@ start time matches `start`, so after a restart a reused pid is reported as
 `lost` and is never signaled. `setsid` makes the pid the process group id, and
 Linux doesn't reuse a pid while its group has members, so once the pid has
 exited, any process left in that group (say, a server the command started with
-`&`) keeps the status `running`, and `kill` signals the group.
+`&`) keeps the status `running`, and `kill` signals the group. Nothing counts
+across a restart: the spawn records the kernel's boot id, and a record from
+another boot is `lost` even if its pid now leads someone else's group.
 
 `processStatus` and `kill` are fixed scripts too. User input reaches them only
 through environment variables, never through string interpolation. `processId`s
