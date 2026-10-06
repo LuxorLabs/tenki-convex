@@ -28,7 +28,18 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         "mutation",
         "internal",
         { key: string; maxActive?: number; ownerId: string; sessionId: string },
-        { full: boolean },
+        {
+          full: boolean;
+          phase?:
+            | "provisioning"
+            | "ready"
+            | "pausing"
+            | "paused"
+            | "resuming"
+            | "terminated"
+            | "error";
+          stale?: true;
+        },
         Name
       >;
       claim: FunctionReference<

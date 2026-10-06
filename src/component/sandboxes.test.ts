@@ -378,6 +378,62 @@ describe("beginResume", () => {
   });
 });
 
+describe("beginResume on a row that moved on", () => {
+  test("never brings back a terminated row", async () => {
+    const t = initConvexTest();
+    await t.mutation(api.sandboxes.claim, {
+      ...alice,
+      token: "a",
+      leaseMs: LEASE,
+    });
+    await t.mutation(api.sandboxes.complete, {
+      ...alice,
+      token: "a",
+      sessionId: "s1",
+      phase: "paused",
+      remote,
+    });
+    await t.mutation(api.sandboxes.release, { ...alice, closed: ["s1"] });
+    expect(
+      await t.mutation(api.sandboxes.beginResume, {
+        ...alice,
+        sessionId: "s1",
+      }),
+    ).toEqual({ full: false, stale: true, phase: "terminated" });
+    expect((await t.query(api.sandboxes.get, alice))?.phase).toBe("terminated");
+    expect(
+      await t.mutation(api.sandboxes.claim, {
+        ...alice,
+        token: "b",
+        leaseMs: LEASE,
+      }),
+    ).toMatchObject({ claimed: true });
+  });
+
+  test("refuses a session the row no longer points at", async () => {
+    const t = initConvexTest();
+    await t.mutation(api.sandboxes.claim, {
+      ...alice,
+      token: "a",
+      leaseMs: LEASE,
+    });
+    await t.mutation(api.sandboxes.complete, {
+      ...alice,
+      token: "a",
+      sessionId: "s2",
+      phase: "ready",
+      remote,
+    });
+    expect(
+      await t.mutation(api.sandboxes.beginResume, {
+        ...alice,
+        sessionId: "s1",
+      }),
+    ).toEqual({ full: false, stale: true, phase: "ready" });
+    expect((await t.query(api.sandboxes.get, alice))?.phase).toBe("ready");
+  });
+});
+
 describe("release", () => {
   test("cancels a create in flight and clears previews", async () => {
     const t = initConvexTest();

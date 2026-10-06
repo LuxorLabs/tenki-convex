@@ -201,6 +201,13 @@ export const sync = mutation({
   },
 });
 
+const RESUMABLE_PHASES: readonly string[] = [
+  "paused",
+  "pausing",
+  "resuming",
+  "ready",
+];
+
 /**
  * Marks the row resuming. Resuming a paused sandbox starts it again, so it's
  * refused once `maxActive` sandboxes are active, as in `claim`.
@@ -211,11 +218,24 @@ export const beginResume = mutation({
     sessionId: v.string(),
     maxActive: v.optional(v.number()),
   },
-  returns: v.object({ full: v.boolean() }),
+  returns: v.object({
+    full: v.boolean(),
+    // Set when the row was destroyed or replaced since the caller read it.
+    stale: v.optional(v.literal(true)),
+    phase: v.optional(phaseValidator),
+  }),
   handler: async (ctx, args) => {
     const existing = await find(ctx, args.ownerId, args.key);
-    if (!existing || existing.sessionId !== args.sessionId) {
-      return { full: false };
+    if (
+      !existing ||
+      existing.sessionId !== args.sessionId ||
+      !RESUMABLE_PHASES.includes(existing.phase)
+    ) {
+      return {
+        full: false,
+        stale: true as const,
+        phase: existing?.phase ?? "terminated",
+      };
     }
     const now = Date.now();
     if (

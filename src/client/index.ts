@@ -617,7 +617,7 @@ export class Tenki {
       args,
       async (session, sandbox) => {
         const sessionId = sandbox.sessionId!;
-        const { full } = await ctx.runMutation(
+        const { full, stale, phase } = await ctx.runMutation(
           this.component.sandboxes.beginResume,
           {
             ...identity,
@@ -626,6 +626,13 @@ export class Tenki {
           },
         );
         if (full) throw capacityExceeded();
+        if (stale) {
+          throw new ConvexError({
+            code: "not_ready",
+            message: `sandbox is ${phase}`,
+            phase: phase!,
+          });
+        }
         try {
           await this.startResume(session);
           await session.waitResumed();
