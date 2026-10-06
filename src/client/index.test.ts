@@ -885,6 +885,35 @@ describe("create on an existing sandbox", () => {
     expect((await t.action(api.create, alice)).phase).toBe("ready");
   });
 
+  test("a cancelled create never closes a session a newer create picked up", async () => {
+    const t = initConvexTest();
+    fake.onCreate = async () => {
+      fake.onCreate = undefined;
+      await t.action(api.destroy, alice);
+    };
+    const realCreate = fake.create.bind(fake);
+    let newer: Promise<{ phase: string; sessionId?: string }> | undefined;
+    fake.create = async (options) => {
+      fake.create = realCreate;
+      const session = (await realCreate(options)) as FakeSession;
+      const close = session.close;
+      session.close = async () => {
+        // A new create arrives just as the cancelled one closes its session.
+        newer = t.action(api.create, alice);
+        await new Promise((r) => setTimeout(r, 50));
+        await close();
+      };
+      return session;
+    };
+    expect(await convexErrorData(t.action(api.create, alice))).toMatchObject({
+      code: "terminated",
+    });
+    const sandbox = await newer!;
+    expect(sandbox.phase).toBe("ready");
+    expect(fake.sessions.get(sandbox.sessionId!)?.state).toBe("RUNNING");
+    expect((await row(t))?.sessionId).toBe(sandbox.sessionId);
+  });
+
   test("a create waiting on one that destroy cancels gets a new sandbox", async () => {
     const t = initConvexTest();
     fake.createDelayMs = 200;
@@ -903,6 +932,33 @@ describe("create on an existing sandbox", () => {
 
 describe("limits", () => {
   const capped = { maxActiveSandboxes: 1 };
+
+  test("a create that destroy cancels keeps its slot until it winds down", async () => {
+    const t = initConvexTest();
+    let open!: () => void;
+    const gate = new Promise<void>((r) => (open = r));
+    fake.onCreate = async () => {
+      fake.onCreate = undefined;
+      await gate;
+    };
+    const aliceCreate = convexErrorData(call(t, "create", {}, capped));
+    while ((await row(t))?.phase !== "provisioning") {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    expect((await call(t, "destroy", {}, capped))?.phase).toBe("terminated");
+    // Alice's VM is still being created, so the cap of 1 is full.
+    expect(
+      await convexErrorData(call(t, "create", { ownerId: "user_bob" }, capped)),
+    ).toMatchObject({ code: "capacity_exceeded" });
+    open();
+    expect(await aliceCreate).toMatchObject({ code: "terminated" });
+    expect(
+      (await call(t, "create", { ownerId: "user_bob" }, capped)).phase,
+    ).toBe("ready");
+    expect(
+      [...fake.sessions.values()].filter((s) => s.state === "RUNNING"),
+    ).toHaveLength(1);
+  });
 
   test("resuming a paused sandbox counts against maxActiveSandboxes", async () => {
     const t = initConvexTest();

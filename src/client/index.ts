@@ -247,10 +247,9 @@ export class Tenki {
           tags: extraTags,
         });
       }
-      const current =
-        sandbox!.phase === "provisioning"
-          ? await this.waitForPeer(ctx, identity)
-          : sandbox!;
+      const current = leased(sandbox!)
+        ? await this.waitForPeer(ctx, identity)
+        : sandbox!;
       const usable = await this.recover(
         ctx,
         identity,
@@ -963,7 +962,7 @@ export class Tenki {
           message: sandbox.lastError?.message ?? "create failed",
         });
       }
-      if (sandbox.phase !== "provisioning") return sandbox;
+      if (!leased(sandbox)) return sandbox;
       if (Date.now() > deadline) {
         throw new ConvexError({
           code: "provisioning_timeout",
@@ -992,6 +991,14 @@ async function waitForExec(session: SandboxSession, timeoutMs: number) {
       });
     await sleep(1_000);
   }
+}
+
+/** Whether a create holds the row's lease: one in progress, or one destroy cancelled that is still winding down. */
+function leased(row: { phase: Phase; claim?: { expiresAt: number } }) {
+  return (
+    row.phase === "provisioning" ||
+    (row.claim !== undefined && row.claim.expiresAt > Date.now())
+  );
 }
 
 /**

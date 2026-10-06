@@ -391,7 +391,25 @@ describe("release", () => {
       closed: [],
     });
     expect(released).toMatchObject({ phase: "terminated" });
-    expect(released?.claim).toBeUndefined();
+    // The create in flight keeps its lease: its slot stays counted, and no other
+    // create can take the row until it has wound down.
+    expect(released?.claim?.token).toBe("a");
+    expect(
+      await t.mutation(api.sandboxes.claim, {
+        ownerId: "user_bob",
+        key: "main",
+        token: "b",
+        leaseMs: LEASE,
+        maxActive: 1,
+      }),
+    ).toMatchObject({ claimed: false, full: true });
+    expect(
+      await t.mutation(api.sandboxes.claim, {
+        ...alice,
+        token: "c",
+        leaseMs: LEASE,
+      }),
+    ).toMatchObject({ claimed: false });
     const late = await t.mutation(api.sandboxes.complete, {
       ...alice,
       token: "a",
@@ -400,6 +418,35 @@ describe("release", () => {
       remote,
     });
     expect(late.accepted).toBe(false);
+    expect(late.sandbox).toMatchObject({ phase: "terminated" });
+    await t.mutation(api.sandboxes.fail, {
+      ...alice,
+      token: "a",
+      code: "terminated",
+      message: "destroyed",
+    });
+    const after = await t.query(api.sandboxes.get, alice);
+    expect(after).toMatchObject({ phase: "terminated" });
+    expect(after?.claim).toBeUndefined();
+    expect(
+      await t.mutation(api.sandboxes.claim, {
+        ...alice,
+        token: "c",
+        leaseMs: LEASE,
+      }),
+    ).toMatchObject({ claimed: true });
+  });
+
+  test("a lease can't outlive the scan that counts cancelled creates", async () => {
+    const t = initConvexTest();
+    const r = await t.mutation(api.sandboxes.claim, {
+      ...alice,
+      token: "a",
+      leaseMs: 24 * 60 * 60_000,
+    });
+    expect(r.sandbox!.claim!.expiresAt - Date.now()).toBeLessThanOrEqual(
+      60 * 60_000,
+    );
   });
 
   test("leaves a row that points at a session it didn't close", async () => {

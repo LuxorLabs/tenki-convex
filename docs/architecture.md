@@ -73,9 +73,11 @@ that the lease is still its own: a session the row records, or one another
 create holding the lease may adopt, is left alone.
 
 **Cancellation.** `destroy` closes the tagged sessions and the row's session,
-then the `release` mutation marks the row `terminated` and drops the lease. A
-create still in flight then has its `complete` rejected, closes the session it
-made, and throws `terminated`. If a create recorded a session `destroy` hadn't
+then the `release` mutation marks the row `terminated`. A create still in flight
+keeps its lease, so its slot stays counted and a new `create` waits for it. Its
+`complete` is then rejected, it closes the session it made, and only then does
+`fail` drop the lease, so no other create can adopt that session in between. The
+create throws `terminated`. If a create recorded a session `destroy` hadn't
 seen, `destroy` goes round again.
 
 **Existing rows.** A caller that finds a row already past `provisioning`
@@ -91,8 +93,9 @@ waiting caller throws the same error, and after 3 minutes it throws
 **Capacity.** With `maxActiveSandboxes`, `claim` counts active rows (every live
 phase except `paused`, including in-flight creates whose lease hasn't expired)
 in the same transaction that reserves the row. `beginResume` does the same
-before a paused row turns `resuming`. Concurrent creates, forks and resumes
-can't get past the cap.
+before a paused row turns `resuming`, and a destroyed row whose create is still
+in flight keeps its slot until that create winds down. Concurrent creates, forks
+and resumes can't get past the cap.
 
 **Namespace.** The namespace defaults to the deployment's `CONVEX_CLOUD_URL`, so
 a dev and a prod deployment sharing one Tenki workspace never adopt each other's
