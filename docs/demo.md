@@ -24,8 +24,9 @@ without polling.
 The demo is meant to be public, so `demo.ts` limits what a visitor can do:
 
 - **Lifetime:** every sandbox lasts 10 minutes. Tenki pauses it at the deadline,
-  and resuming would start a new lifetime, so the demo refuses to resume a
-  sandbox older than 10 minutes and replaces it on the next start.
+  and resuming would start a new lifetime, so the demo refuses to resume or fork
+  a sandbox older than 10 minutes; destroy it and start again. A paused sandbox
+  is deleted 30 minutes after it pauses.
 - **Size:** 2 vCPU and 2 GB.
 - **Egress:** only `pypi.org`, `files.pythonhosted.org` and `registry.npmjs.org`
   are reachable.

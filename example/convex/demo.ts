@@ -20,6 +20,8 @@ const tenki = new Tenki(components.tenki, {
     cpuCores: 2,
     memoryMb: 2048,
     maxDurationMs: DEMO_LIFETIME_MS,
+    // Tenki keeps a paused sandbox for a week by default; the demo deletes it soon after.
+    pauseRetentionMs: 30 * 60_000,
     allowDomains: ["pypi.org", "files.pythonhosted.org", "registry.npmjs.org"],
     tags: ["convex-demo"],
   },
@@ -30,7 +32,7 @@ const sandboxKey = v.union(v.literal("main"), v.literal("fork"));
 type Identity = { ownerId: string; key: "main" | "fork" };
 
 // Tenki pauses a sandbox at its deadline, and resuming it starts a new lifetime,
-// so the demo never resumes one older than DEMO_LIFETIME_MS.
+// so the demo never resumes or forks one older than DEMO_LIFETIME_MS.
 async function outlived(ctx: ActionCtx, identity: Identity) {
   const sandbox = await tenki.get(ctx, identity);
   if (!sandbox?.sessionId || sandbox.phase === "terminated") return false;
@@ -39,7 +41,10 @@ async function outlived(ctx: ActionCtx, identity: Identity) {
     sandbox.sessionId.replaceAll("-", "").slice(0, 12),
     16,
   );
-  return Date.now() - createdAt > DEMO_LIFETIME_MS;
+  // An id it can't read counts as outlived, so the guard fails closed.
+  return (
+    !Number.isFinite(createdAt) || Date.now() - createdAt > DEMO_LIFETIME_MS
+  );
 }
 
 async function ownerId(ctx: ActionCtx): Promise<string> {
@@ -138,12 +143,16 @@ export const refresh = action({
 
 export const fork = action({
   args: {},
-  handler: async (ctx) =>
-    await tenki.fork(ctx, {
-      ownerId: await ownerId(ctx),
-      from: "main",
-      to: "fork",
-    }),
+  handler: async (ctx) => {
+    const owner = await ownerId(ctx);
+    if (await outlived(ctx, { ownerId: owner, key: "main" })) {
+      throw new ConvexError({
+        code: "expired",
+        message: "This sandbox reached its 10-minute lifetime; destroy it",
+      });
+    }
+    return await tenki.fork(ctx, { ownerId: owner, from: "main", to: "fork" });
+  },
 });
 
 export const destroy = action({
