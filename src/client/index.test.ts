@@ -359,6 +359,39 @@ describe("refresh and destroy", () => {
     expect(again.sessionId).not.toBe(sessionId);
   });
 
+  test("destroy closes a session a create recorded after destroy listed", async () => {
+    const t = initConvexTest();
+    fake.createDelayMs = 50;
+    const realList = fake.list.bind(fake);
+    let calls = 0;
+    let createDone!: () => void;
+    const createFinished = new Promise<void>((r) => (createDone = r));
+    fake.list = async (options) => {
+      const sessions = await realList(options);
+      // destroy's listing comes back from before the create's session existed.
+      if (++calls === 2) await createFinished;
+      return sessions;
+    };
+    const created = t.action(api.create, alice);
+    void created.finally(createDone);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(await t.action(api.destroy, alice)).toMatchObject({
+      phase: "terminated",
+    });
+    const { sessionId } = await created;
+    expect(fake.sessions.get(sessionId!)!.state).toBe("TERMINATING");
+  });
+
+  test("refresh clears previews once the session is gone", async () => {
+    const t = initConvexTest();
+    const { sessionId } = await t.action(api.create, alice);
+    await call(t, "exposePort", { port: 8080 });
+    fake.sessions.delete(sessionId!);
+    const after = await t.action(api.refresh, alice);
+    expect(after?.phase).toBe("terminated");
+    expect(after?.previews).toBeUndefined();
+  });
+
   test("destroy of an unknown identity is a no-op", async () => {
     const t = initConvexTest();
     expect(await t.action(api.destroy, alice)).toBeNull();
@@ -933,6 +966,12 @@ describe("create on an existing sandbox", () => {
 describe("limits", () => {
   const capped = { maxActiveSandboxes: 1 };
 
+  test("readiness waits stop before the action limit", async () => {
+    const t = initConvexTest();
+    await call(t, "create", { options: { waitTimeoutMs: 60 * 60_000 } });
+    expect(fake.creates[0].waitTimeoutMs).toBe(8 * 60_000);
+  });
+
   test("a create's lease lasts 5 minutes", async () => {
     const t = initConvexTest();
     let leaseMs = 0;
@@ -1009,6 +1048,23 @@ describe("limits", () => {
 });
 
 describe("fork", () => {
+  test("a fork whose snapshot can't be read fails and frees the target", async () => {
+    const t = initConvexTest();
+    await t.action(api.create, alice);
+    fake.getSnapshot = async () => {
+      throw sdkError("SnapshotNotFoundError", "[not_found] snapshot not found");
+    };
+    expect(
+      await convexErrorData(call(t, "fork", { from: "main", to: "fork" })),
+    ).toMatchObject({ code: "snapshot_not_found" });
+    const target = await t.query(components.tenki.sandboxes.get, {
+      ...alice,
+      key: "fork",
+    });
+    expect(target).toMatchObject({ phase: "error" });
+    expect(target?.claim).toBeUndefined();
+  });
+
   test("a fork refused at the cap takes no snapshot", async () => {
     const t = initConvexTest();
     const capped = { maxActiveSandboxes: 1 };
