@@ -338,3 +338,97 @@ describe("capacity", () => {
     expect(third.claimed).toBe(true);
   });
 });
+
+describe("beginResume", () => {
+  test("a paused sandbox can't resume past maxActive; a running one can", async () => {
+    const t = initConvexTest();
+    for (const [ownerId, token, sessionId, phase] of [
+      ["user_alice", "a", "s1", "paused"],
+      ["user_bob", "b", "s2", "ready"],
+    ] as const) {
+      await t.mutation(api.sandboxes.claim, {
+        ownerId,
+        key: "main",
+        token,
+        leaseMs: LEASE,
+      });
+      await t.mutation(api.sandboxes.complete, {
+        ownerId,
+        key: "main",
+        token,
+        sessionId,
+        phase,
+        remote,
+      });
+    }
+    const resume = (ownerId: string, sessionId: string) =>
+      t.mutation(api.sandboxes.beginResume, {
+        ownerId,
+        key: "main",
+        sessionId,
+        maxActive: 1,
+      });
+    expect(await resume("user_alice", "s1")).toEqual({ full: true });
+    expect((await t.query(api.sandboxes.get, alice))?.phase).toBe("paused");
+    expect(await resume("user_bob", "s2")).toEqual({ full: false });
+    expect(
+      (await t.query(api.sandboxes.get, { ownerId: "user_bob", key: "main" }))
+        ?.phase,
+    ).toBe("resuming");
+  });
+});
+
+describe("release", () => {
+  test("cancels a create in flight and clears previews", async () => {
+    const t = initConvexTest();
+    await t.mutation(api.sandboxes.claim, {
+      ...alice,
+      token: "a",
+      leaseMs: LEASE,
+    });
+    const released = await t.mutation(api.sandboxes.release, {
+      ...alice,
+      closed: [],
+    });
+    expect(released).toMatchObject({ phase: "terminated" });
+    expect(released?.claim).toBeUndefined();
+    const late = await t.mutation(api.sandboxes.complete, {
+      ...alice,
+      token: "a",
+      sessionId: "s1",
+      phase: "ready",
+      remote,
+    });
+    expect(late.accepted).toBe(false);
+  });
+
+  test("leaves a row that points at a session it didn't close", async () => {
+    const t = initConvexTest();
+    await t.mutation(api.sandboxes.claim, {
+      ...alice,
+      token: "a",
+      leaseMs: LEASE,
+    });
+    await t.mutation(api.sandboxes.complete, {
+      ...alice,
+      token: "a",
+      sessionId: "s2",
+      phase: "ready",
+      remote,
+    });
+    await t.mutation(api.sandboxes.setPreview, {
+      ...alice,
+      sessionId: "s2",
+      preview: { port: 80, url: "https://x" },
+    });
+    expect(
+      await t.mutation(api.sandboxes.release, { ...alice, closed: ["s1"] }),
+    ).toMatchObject({ phase: "ready" });
+    const released = await t.mutation(api.sandboxes.release, {
+      ...alice,
+      closed: ["s1", "s2"],
+    });
+    expect(released).toMatchObject({ phase: "terminated" });
+    expect(released?.previews).toBeUndefined();
+  });
+});

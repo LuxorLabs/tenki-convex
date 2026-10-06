@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "vitest";
 import {
+  cappedArgv,
   KILL_SCRIPT,
   newProcessId,
   parseStatus,
@@ -95,8 +96,55 @@ test.skipIf(!isLinux)(
       "-c",
       `kill -- -$(cat "${join(procHome, ".tenki-convex/proc", moved, "pid")}")`,
     ]);
+
+    // Children the command leaves behind keep it running, and kill reaches them.
+    const daemon = newProcessId();
+    run(SPAWN_SCRIPT, {
+      TENKI_CVX_ID: daemon,
+      TENKI_CVX_CMD: "sleep 30 & exit 0",
+    });
+    await settle();
+    expect(status(daemon)).toMatchObject({ state: "running" });
+    expect(
+      run(KILL_SCRIPT, {
+        TENKI_CVX_ID: daemon,
+        TENKI_CVX_SIGNAL: "TERM",
+      }).trim(),
+    ).toBe("signaled");
+    await settle();
+    expect(status(daemon)).toMatchObject({ state: "exited", exitCode: 0 });
+
+    // INT and HUP reach the process where env can restore their handlers.
+    const canReset =
+      spawnSync("env", ["--default-signal=INT", "true"]).status === 0;
+    for (const signal of canReset ? ["INT", "HUP"] : []) {
+      const id = newProcessId();
+      run(SPAWN_SCRIPT, { TENKI_CVX_ID: id, TENKI_CVX_CMD: "sleep 30" });
+      await settle();
+      expect(
+        run(KILL_SCRIPT, { TENKI_CVX_ID: id, TENKI_CVX_SIGNAL: signal }).trim(),
+      ).toBe("signaled");
+      await settle();
+      expect(status(id)).toMatchObject({ state: "killed", signal });
+    }
   },
 );
+
+test("exec output is capped per stream inside the sandbox, keeping the exit code", () => {
+  const [bash, ...args] = cappedArgv(
+    ["bash", "-c", "head -c 100000 /dev/zero; echo oops >&2; exit 3"],
+    5,
+  );
+  const r = spawnSync(bash, args);
+  expect(r.status).toBe(3);
+  expect(r.stdout.byteLength).toBe(5);
+  expect(r.stderr.toString()).toBe("oops\n");
+  const argv = spawnSync(
+    bash,
+    cappedArgv(["printf", "%s", "a b"], 100).slice(1),
+  );
+  expect(argv.stdout.toString()).toBe("a b");
+});
 
 test("an exit file caught mid-write reads as still running", () => {
   expect(parseStatus("exited  12\nout", 100)).toMatchObject({

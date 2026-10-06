@@ -15,7 +15,7 @@ export interface SessionLike {
   sticky: boolean;
 }
 
-const TAG_PREFIX = "cvx:";
+export const TAG_PREFIX = "cvx:";
 // Tenki tags are capped at 32 chars of [a-z0-9_:.-], so identities are hashed.
 const TAG_HASH_CHARS = 32 - TAG_PREFIX.length;
 
@@ -101,6 +101,20 @@ export function toArgv(command: string | string[]): string[] {
   return command;
 }
 
+// The SDK buffers a command's whole output in the action's memory, so the cap is
+// applied in the guest: each stream keeps its first $1 bytes and drains the rest,
+// and pipefail passes the command's exit code through.
+export const EXEC_SCRIPT = `set -o pipefail
+max=$1
+shift
+cap() { head -c "$max"; cat > /dev/null; }
+{ { "$@" 2>&1 1>&3 3>&- | cap 1>&2 3>&-; } 3>&1 | cap; }`;
+
+/** Runs `argv` with each output stream capped at `maxBytes` inside the sandbox. */
+export function cappedArgv(argv: string[], maxBytes: number): string[] {
+  return ["bash", "-c", EXEC_SCRIPT, "bash", String(maxBytes), ...argv];
+}
+
 const ERROR_CODES: Record<string, string> = {
   MissingAuthTokenError: "unauthenticated",
   InvalidAuthTokenError: "unauthenticated",
@@ -123,7 +137,24 @@ const ERROR_CODES: Record<string, string> = {
   TemplateRuntimeFailedError: "runtime_failed",
   PortLimitExceededError: "port_limit_exceeded",
   InboundDisabledError: "inbound_disabled",
+  SnapshotNotFoundError: "snapshot_not_found",
+  TemplateNotFoundError: "invalid_argument",
+  RegistryImageNotFoundError: "invalid_argument",
+  InvalidTemplateSpecError: "invalid_argument",
+  DataPlaneNotReadyError: "unavailable",
+  CommandTimeoutError: "timeout",
 };
+
+// Codes the SDK leaves as a generic SandboxError, read from its "[code] message" text.
+const RPC_CODES: Record<string, string> = {
+  invalid_argument: "invalid_argument",
+  unavailable: "unavailable",
+  deadline_exceeded: "timeout",
+};
+const RPC_CODE = /^\[([a-z_]+)\]/;
+// The SDK's readiness waits throw plain Errors.
+const TERMINAL = /session entered terminal state/;
+const WAIT_TIMEOUT = /^timeout waiting for session/;
 
 // Tenki reports an empty balance as a generic failed_precondition.
 const NO_CREDITS = /balance is empty|top up/i;
@@ -133,7 +164,14 @@ export function describeError(err: unknown): { code: string; message: string } {
     if (err.name === "InvalidStateError" && NO_CREDITS.test(err.message)) {
       return { code: "insufficient_credits", message: err.message };
     }
-    return { code: ERROR_CODES[err.name] ?? "internal", message: err.message };
+    const code =
+      ERROR_CODES[err.name] ??
+      (TERMINAL.test(err.message)
+        ? "terminated"
+        : WAIT_TIMEOUT.test(err.message)
+          ? "timeout"
+          : RPC_CODES[RPC_CODE.exec(err.message)?.[1] ?? ""]);
+    return { code: code ?? "internal", message: err.message };
   }
   return { code: "internal", message: String(err) };
 }
@@ -148,20 +186,34 @@ export function isGone(err: unknown): boolean {
 // the SDK documents as cleared across a pause. Inputs arrive via env, never
 // interpolated. A pid only counts as ours if its start time matches the one
 // recorded at spawn, so a pid reused after a restart is never reported or signaled.
+// Once that pid exits, anything it left in its process group (setsid made the pid
+// the group id, which Linux won't reuse while the group has members) still counts.
 const PRELUDE = `home=$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)
 D="\${home:-$HOME}/.tenki-convex/proc/$TENKI_CVX_ID"
-start_of() { sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f20; }
+start_of() { sed -n 's/^.*) \\([^Z]\\)/\\1/p' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f20; }
 alive() {
   p=$(cat "$D/pid" 2>/dev/null) || return 1
   s=$(start_of "$p")
-  [ -n "$s" ] && [ "$s" = "$(cat "$D/start" 2>/dev/null)" ]
+  if [ -n "$s" ]; then [ "$s" = "$(cat "$D/start" 2>/dev/null)" ]; return; fi
+  for f in /proc/[0-9]*/stat; do
+    { read -r l < "$f"; } 2>/dev/null || continue
+    r=\${l##*) }
+    set -- $r
+    [ "$1" != Z ] && [ "$3" = "$p" ] && return 0
+  done
+  return 1
 }`;
 
+// Background jobs of a non-interactive shell ignore INT and QUIT, and nohup
+// ignores HUP. Where env can restore them (GNU coreutils 8.32+), the process
+// starts with default handlers so every signal kill allows reaches it.
 export const SPAWN_SCRIPT = `set -e
 ${PRELUDE}
 mkdir -p "$D"
 export TENKI_CVX_DIR="$D"
-setsid nohup bash -c 'cmd=$TENKI_CVX_CMD; dir=$TENKI_CVX_DIR; unset TENKI_CVX_CMD TENKI_CVX_DIR TENKI_CVX_ID; bash -lc "$cmd"; echo $? > "$dir/exit.tmp"; mv "$dir/exit.tmp" "$dir/exit"' > "$D/log" 2>&1 < /dev/null &
+reset=nohup
+env --default-signal=HUP true 2>/dev/null && reset="env --default-signal=HUP,INT,QUIT"
+setsid $reset bash -c 'cmd=$TENKI_CVX_CMD; dir=$TENKI_CVX_DIR; unset TENKI_CVX_CMD TENKI_CVX_DIR TENKI_CVX_ID; bash -lc "$cmd"; echo $? > "$dir/exit.tmp"; mv "$dir/exit.tmp" "$dir/exit"' > "$D/log" 2>&1 < /dev/null &
 pid=$!
 echo "$pid" > "$D/pid"
 start_of "$pid" > "$D/start" || true
@@ -170,8 +222,8 @@ echo "$pid"`;
 export const STATUS_SCRIPT = `${PRELUDE}
 [ -d "$D" ] || { echo missing; exit 0; }
 size=$(wc -c < "$D/log" | tr -d ' ')
-if [ -f "$D/exit" ]; then echo "exited $(cat "$D/exit") $size"
-elif alive; then echo "running - $size"
+if alive; then echo "running - $size"
+elif [ -f "$D/exit" ]; then echo "exited $(cat "$D/exit") $size"
 elif [ -f "$D/signal" ]; then echo "killed $(cat "$D/signal") $size"
 else echo "lost - $size"; fi
 tail -c "$TENKI_CVX_TAIL" "$D/log"`;

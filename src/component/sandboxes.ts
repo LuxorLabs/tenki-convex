@@ -176,6 +176,63 @@ export const sync = mutation({
     await ctx.db.patch("sandboxes", existing._id, {
       phase: args.phase,
       ...(args.remote ? { remote: args.remote } : {}),
+      ...(args.phase === "terminated" ? { previews: undefined } : {}),
+      updatedAt: Date.now(),
+    });
+    return (await ctx.db.get("sandboxes", existing._id))!;
+  },
+});
+
+/**
+ * Marks the row resuming. Resuming a paused sandbox starts it again, so it's
+ * refused once `maxActive` sandboxes are active, as in `claim`.
+ */
+export const beginResume = mutation({
+  args: {
+    ...identity,
+    sessionId: v.string(),
+    maxActive: v.optional(v.number()),
+  },
+  returns: v.object({ full: v.boolean() }),
+  handler: async (ctx, args) => {
+    const existing = await find(ctx, args.ownerId, args.key);
+    if (!existing || existing.sessionId !== args.sessionId) {
+      return { full: false };
+    }
+    const now = Date.now();
+    if (
+      existing.phase === "paused" &&
+      args.maxActive !== undefined &&
+      (await countActive(ctx, args.maxActive, now)) >= args.maxActive
+    ) {
+      return { full: true };
+    }
+    await ctx.db.patch("sandboxes", existing._id, {
+      phase: "resuming",
+      updatedAt: now,
+    });
+    return { full: false };
+  },
+});
+
+/**
+ * Marks the row terminated after `destroy` closed `closed`, dropping any
+ * creation lease so a create in flight can't complete. A row that points at a
+ * session `destroy` never closed is returned unchanged.
+ */
+export const release = mutation({
+  args: { ...identity, closed: v.array(v.string()) },
+  returns: v.union(sandboxValidator, v.null()),
+  handler: async (ctx, args) => {
+    const existing = await find(ctx, args.ownerId, args.key);
+    if (!existing) return null;
+    if (existing.sessionId && !args.closed.includes(existing.sessionId)) {
+      return existing;
+    }
+    await ctx.db.patch("sandboxes", existing._id, {
+      phase: "terminated",
+      claim: undefined,
+      previews: undefined,
       updatedAt: Date.now(),
     });
     return (await ctx.db.get("sandboxes", existing._id))!;
