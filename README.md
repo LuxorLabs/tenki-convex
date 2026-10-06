@@ -159,7 +159,7 @@ Every method takes the action `ctx` and the sandbox's `{ ownerId, key }`.
   the tail of its output.
 - `kill({ processId, signal? })` signals the process and its children with
   `TERM` (the default), `KILL`, `INT` or `HUP`. `INT` and `HUP` need an `env`
-  with `--default-signal` in the image (GNU coreutils 8.32 or later); without it
+  with `--default-signal` in the image (GNU coreutils 8.31 or later); without it
   they have no effect.
 - `readFile({ path, encoding?, maxBytes? })` returns a string, or an
   `ArrayBuffer` with `encoding: "bytes"`. Files over `maxBytes` (16 MiB by
@@ -210,14 +210,15 @@ so concurrent creates, forks and resumes can't exceed it.
 
 ## Lifetime
 
-A Tenki sandbox has an absolute lifetime, set with `maxDurationMs` at create
-time. Your workspace's limits set the default and the maximum. Activity does not
-extend it; call `extend`. At the deadline Tenki pauses a sandbox that was used
-and terminates one that wasn't. The row keeps its last known phase until
-`refresh`, `reconcile` or the next `create` catches it up. `create` resumes a
-paused sandbox, and resuming after the deadline starts a new lifetime of the
-same length, so enforce your own limit if sandboxes must not outlive it (see
-`example/convex/demo.ts`).
+A Tenki sandbox runs for at most `maxDurationMs` at a time, set at create time;
+your workspace's limits set the default and the maximum. Activity does not
+extend it; call `extend`. At the deadline Tenki pauses the sandbox and keeps it
+for the pause retention (7 days unless you set `pauseRetentionMs`), then deletes
+it. The row keeps its last known phase until `refresh`, `reconcile` or the next
+`create` catches it up. `create` resumes a paused sandbox, and resuming one that
+reached its deadline starts a new lifetime of the same length, so
+`maxDurationMs` bounds each run, not the sandbox's total life. If sandboxes must
+not outlive a limit, enforce it yourself (see `example/convex/demo.ts`).
 
 ## Example and demo
 

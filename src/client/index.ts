@@ -84,9 +84,10 @@ export interface TenkiOptions {
   /** Applied to every `create` call; per-call options win. */
   defaults?: CreateSandboxOptions;
   /**
-   * Refuse to start a new sandbox once this many are active (not paused) across
-   * all owners, counting creates in flight; `create` then throws
-   * `capacity_exceeded`. Checked in the same transaction that reserves the row.
+   * Refuse to start or resume a sandbox once this many are active (not paused)
+   * across all owners, counting creates in flight; `create`, `fork` and
+   * `resume` then throw `capacity_exceeded`. Checked in the same transaction
+   * that reserves the row.
    */
   maxActiveSandboxes?: number;
   client?: SandboxClient;

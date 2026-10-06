@@ -9,17 +9,16 @@
   ports as public URLs.
 - `reconcile` keeps rows in sync with sandboxes that reached their deadline.
 - An empty Tenki workspace balance is reported as `insufficient_credits`.
-- `create` resumes a paused sandbox, including one Tenki paused at its deadline;
-  pass `resume: false` to get it as it is.
-- `exec` caps output inside the sandbox, so a command that prints a lot can no
-  longer exhaust the action's memory.
-- Resuming a sandbox counts against `maxActiveSandboxes`.
-- `fork` refuses a target that is still live, and lets Tenki delete its snapshot
-  once nothing uses it. Restoring a snapshot records the snapshot's size rather
-  than the `defaults`.
+- `create` resumes a paused sandbox, including one Tenki paused at its deadline,
+  which starts a new lifetime; pass `resume: false` to get it as it is.
+- `exec` caps output per stream inside the sandbox (`maxOutputBytes`, 1 MiB by
+  default); commands need `bash`, `head` and `cat` in the image.
+- `maxActiveSandboxes` also covers resumes and forks.
+- `fork` throws `already_exists` if the target exists, records the source's
+  size, and its snapshot is deleted once nothing uses it.
 - `destroy` cancels a `create` still in flight.
-- `readFile` throws `file_too_large` for files over 16 MiB (set `maxBytes` to
-  change it), and `kill` can send `INT` and `HUP`.
-- Errors that were reported as `internal` now have specific codes:
-  `invalid_argument`, `snapshot_not_found`, `unavailable`, `timeout` and
-  `terminated`.
+- `readFile` throws `file_too_large` above `maxBytes` (16 MiB by default).
+- `kill` sends `TERM`, `KILL`, `INT` or `HUP`.
+- Tags must be valid Tenki tags, and the `cvx:` prefix is reserved.
+- Errors carry specific codes, including `invalid_argument`, `unavailable`,
+  `snapshot_not_found`, `timeout` and `terminated`.

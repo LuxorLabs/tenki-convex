@@ -208,7 +208,7 @@ alive() {
 }`;
 
 // Background jobs of a non-interactive shell ignore INT and QUIT, and nohup
-// ignores HUP. Where env can restore them (GNU coreutils 8.32+), the process
+// ignores HUP. Where env can restore them (GNU coreutils 8.31+), the process
 // starts with default handlers so every signal kill allows reaches it.
 export const SPAWN_SCRIPT = `set -e
 ${PRELUDE}

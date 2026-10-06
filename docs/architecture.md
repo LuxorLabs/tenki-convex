@@ -187,11 +187,11 @@ pause and resume, but not a guest-agent restart; it then reports `lost`.
 
 ## Drift and `reconcile`
 
-Tenki ends sandboxes on its own schedule: at the deadline, used sandboxes are
-paused and unused ones are terminated. Nothing notifies Convex when that
-happens.
+Tenki ends sandboxes on its own schedule: at the deadline it pauses every
+sandbox, and it deletes a paused one after the pause retention. Nothing notifies
+Convex when that happens.
 
-Rows catch up in three ways:
+Rows catch up in four ways:
 
 - `refresh` re-reads one sandbox.
 - Any call that hits a gone session marks the row `terminated`, and an
