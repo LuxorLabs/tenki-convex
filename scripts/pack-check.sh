@@ -11,7 +11,9 @@ cat > package.json <<'JSON'
 { "name": "pack-check", "private": true, "type": "module" }
 JSON
 # @types/ws: @tenkicloud/sandbox's published types import "ws" without depending on its types.
-npm install --silent --no-fund --no-audit "$tarball" convex typescript @types/node @types/ws
+# --no-strict-allow-scripts: `npm run` exports this repo's .npmrc setting, which a
+# customer's project doesn't have.
+npm install --silent --no-fund --no-audit --no-strict-allow-scripts "$tarball" convex typescript @types/node @types/ws
 mkdir -p convex
 cat > convex/convex.config.ts <<'TS'
 import { defineApp } from "convex/server";

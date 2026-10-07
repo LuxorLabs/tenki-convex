@@ -106,5 +106,9 @@
   "module": "./dist/client/index.js",
   "dependencies": {
     "@tenkicloud/sandbox": "^1.4.1"
+  },
+  "allowScripts": {
+    "esbuild": false,
+    "fsevents": false
   }
 }
