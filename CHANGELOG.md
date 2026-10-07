@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.1.1
+
+- No changes to the component or its runtime dependencies.
+
+## 0.1.0
 
 - Create, run commands in, and destroy Tenki sandboxes from Convex actions, with
   each sandbox's state in a Convex table your UI can subscribe to.
