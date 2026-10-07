@@ -6,28 +6,41 @@ until a maintainer of `@tenkicloud/convex` approves it on npm with 2FA.
 
 ## Cutting a release
 
-Bump the version, tag it, push, then approve the staged version on npm:
+Bump the version in a pull request:
 
 ```sh
-npm version 0.1.1 --no-git-tag-version
-git commit -am "@tenkicloud/convex 0.1.1"
-git tag -a v0.1.1 -m "@tenkicloud/convex 0.1.1"
-git push origin main --follow-tags
+npm version 0.1.2 --no-git-tag-version
 ```
 
-The tag must be annotated: `--follow-tags` doesn't push lightweight tags. The
-workflow refuses a tag that doesn't match `package.json`, a tag that isn't on
-`main`, and a version that is already on npm.
+Its `preversion` hook runs `npm ci`, a clean build, the tests, lint and
+typecheck. The build runs `convex codegen`, which needs the Convex deployment
+that `npm run dev` sets up.
+
+Once the pull request merges, tag the merge commit on `main` and push the tag:
+
+```sh
+git fetch origin main
+git tag -a v0.1.2 -m "@tenkicloud/convex 0.1.2" origin/main
+git push origin v0.1.2
+```
+
+The workflow refuses a tag that doesn't match `package.json`, a tag that isn't
+on `main`, and a version that is already on npm.
 
 The publish job stages the version with `npm stage publish`. Nothing is live
 until a maintainer of `@tenkicloud/convex` approves it with 2FA. The run summary
 shows the stage id:
 
 ```sh
+npm login                      # once; opens the browser
 npm stage approve <stage-id>   # or Staged Packages on npmjs.com
 npm stage reject <stage-id>    # to drop it instead
 npm stage list @tenkicloud/convex
 ```
+
+`npm stage` needs npm 11.15 or later and a CLI logged in with `npm login`.
+`npm stage approve` opens the browser again for the 2FA check. Approving on
+npmjs.com needs nothing installed.
 
 ## Settings releases rely on
 
