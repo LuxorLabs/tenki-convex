@@ -1,8 +1,9 @@
 # Releasing
 
-The repository is public and `package.json` no longer has `"private": true`
-(steps 1 and 2 under Going public are done). Nothing reaches npm until someone
-pushes a `v*` tag and a reviewer approves the release run.
+The repository is public and 0.1.0 is on npm (steps 1 to 4 under Going public
+are done). A release reaches npm only after someone pushes a `v*` tag, a
+reviewer approves the release run, and a maintainer of `@tenkicloud/convex`
+approves the staged version on npm.
 
 ## Before going public
 
@@ -30,31 +31,20 @@ pushes a `v*` tag and a reviewer approves the release run.
    - **Settings → Rules → Rulesets:** add a tag ruleset for `v*` with **Restrict
      creations**, **Restrict updates** and **Restrict deletions**, and only
      release maintainers on the bypass list.
-4. Publish the first version. `.github/workflows/npm-publish.yml` publishes when
-   a `v*` tag matching `package.json`'s version and pointing at a commit on
-   `main` is pushed, after build, tests, typecheck, lint, the pack check and a
-   production dependency audit, and after one of the `npm-publish` environment's
-   reviewers approves the run. A trusted publisher can't be set up for a package
-   that doesn't exist yet, so the first version uses a token:
-   - Create an npm granular access token that can publish to `@tenkicloud`, with
-     the shortest expiration that covers the first release, and save it as
-     `NPM_TOKEN` in the `npm-publish` environment's secrets, not as a repository
-     secret. Only the approved publish job can read an environment secret.
-   - Run **Release** from the Actions tab to see every gate pass; a manual run
-     is always a dry run. Then tag and push:
-
-     ```sh
-     git tag -a v0.1.0 -m "@tenkicloud/convex 0.1.0" && git push origin v0.1.0
-     ```
-
-   - Approve the run.
+4. Publish the first version. Done: 0.1.0 was published on 2026-10-07 with a
+   short-lived granular token stored as the `npm-publish` environment's
+   `NPM_TOKEN` secret, since a trusted publisher can't be set up for a package
+   that doesn't exist yet. The workflow no longer has that token path.
 5. On npmjs.com, add a trusted publisher to `@tenkicloud/convex`: GitHub
    Actions, organization `LuxorLabs`, repository `tenki-convex`, workflow
-   `npm-publish.yml`, environment `npm-publish`. Then delete the `NPM_TOKEN`
-   secret and revoke the token; later releases publish without one. Finally,
-   under the package's **Settings → Publishing access**, choose **Require
-   two-factor authentication and disallow tokens**. Trusted publishing keeps
-   working, and no token can publish the package.
+   `npm-publish.yml`, environment `npm-publish`. Under its allowed actions,
+   `npm stage publish` is always allowed; leave `npm publish` and dist-tags
+   unchecked, since the workflow only stages. A new trusted publisher has to
+   complete a publish within 2 days or it expires, so add it close to a release.
+   Then delete the `NPM_TOKEN` secret and revoke the token. Finally, under the
+   package's **Settings → Publishing access**, choose **Require two-factor
+   authentication and disallow tokens**. Trusted publishing keeps working, and
+   no token can publish the package.
 
 6. Run Convex's
    [preflight check](https://www.convex.dev/components/submit/check) on the
@@ -71,7 +61,8 @@ pushes a `v*` tag and a reviewer approves the release run.
 
 ## Later releases
 
-Bump the version, tag it, push, and approve the run:
+Bump the version, tag it, push, approve the run, then approve the staged version
+on npm:
 
 ```sh
 npm version 0.1.1 --no-git-tag-version
@@ -83,6 +74,17 @@ git push origin main --follow-tags
 The tag must be annotated: `--follow-tags` doesn't push lightweight tags. The
 workflow refuses a tag that doesn't match `package.json`, a tag that isn't on
 `main`, and a version that is already on npm.
+
+After a reviewer on the `npm-publish` environment approves the run, the publish
+job stages the version with `npm stage publish`. Nothing is live until a
+maintainer of `@tenkicloud/convex` approves it with 2FA. The run summary shows
+the stage id:
+
+```sh
+npm stage approve <stage-id>   # or Staged Packages on npmjs.com
+npm stage reject <stage-id>    # to drop it instead
+npm stage list @tenkicloud/convex
+```
 
 ## Submitting to the Components Directory
 
