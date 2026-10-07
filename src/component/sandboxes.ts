@@ -12,6 +12,8 @@ export const sandboxValidator = schema.tables.sandboxes.validator.extend({
 });
 
 const identity = { ownerId: v.string(), key: v.string() };
+// No lease runs longer than this, so a destroyed row with a live lease was updated within it.
+const MAX_LEASE_MS = 60 * 60_000;
 
 function requireIdentity(args: { ownerId: string; key: string }) {
   if (args.ownerId.trim().length === 0)
@@ -64,7 +66,10 @@ export const claim = mutation({
   handler: async (ctx, args) => {
     requireIdentity(args);
     const now = Date.now();
-    const lease = { token: args.token, expiresAt: now + args.leaseMs };
+    const lease = {
+      token: args.token,
+      expiresAt: now + Math.min(args.leaseMs, MAX_LEASE_MS),
+    };
     const existing = await find(ctx, args.ownerId, args.key);
     const atCapacity = async () =>
       args.maxActive !== undefined &&
@@ -82,7 +87,8 @@ export const claim = mutation({
       return { claimed: true, sandbox: (await ctx.db.get("sandboxes", id))! };
     }
     const reclaimable =
-      existing.phase === "terminated" ||
+      (existing.phase === "terminated" &&
+        !(existing.claim && existing.claim.expiresAt >= now)) ||
       existing.phase === "error" ||
       (existing.phase === "provisioning" &&
         !existing.sessionId &&
@@ -124,6 +130,11 @@ export const complete = mutation({
     if (!existing || existing.claim?.token !== args.token) {
       return { accepted: false, sandbox: existing };
     }
+    // Destroyed while it was being created. The lease stays until the create has
+    // closed its session and called `fail`, so no other create can adopt it first.
+    if (existing.phase === "terminated") {
+      return { accepted: false, sandbox: existing };
+    }
     await ctx.db.patch("sandboxes", existing._id, {
       phase: args.phase,
       sessionId: args.sessionId,
@@ -151,6 +162,13 @@ export const fail = mutation({
     const existing = await find(ctx, args.ownerId, args.key);
     if (!existing || existing.claim?.token !== args.token) return null;
     const now = Date.now();
+    if (existing.phase === "terminated") {
+      await ctx.db.patch("sandboxes", existing._id, {
+        claim: undefined,
+        updatedAt: now,
+      });
+      return null;
+    }
     await ctx.db.patch("sandboxes", existing._id, {
       phase: "error",
       claim: undefined,
@@ -176,7 +194,90 @@ export const sync = mutation({
     await ctx.db.patch("sandboxes", existing._id, {
       phase: args.phase,
       ...(args.remote ? { remote: args.remote } : {}),
+      ...(args.phase === "terminated" ? { previews: undefined } : {}),
       updatedAt: Date.now(),
+    });
+    return (await ctx.db.get("sandboxes", existing._id))!;
+  },
+});
+
+const RESUMABLE_PHASES: readonly string[] = [
+  "paused",
+  "pausing",
+  "resuming",
+  "ready",
+];
+
+/**
+ * Marks the row resuming. Resuming a paused sandbox starts it again, so it's
+ * refused once `maxActive` sandboxes are active, as in `claim`.
+ */
+export const beginResume = mutation({
+  args: {
+    ...identity,
+    sessionId: v.string(),
+    maxActive: v.optional(v.number()),
+  },
+  returns: v.object({
+    full: v.boolean(),
+    // Set when the row was destroyed or replaced since the caller read it.
+    stale: v.optional(v.literal(true)),
+    phase: v.optional(phaseValidator),
+  }),
+  handler: async (ctx, args) => {
+    const existing = await find(ctx, args.ownerId, args.key);
+    if (
+      !existing ||
+      existing.sessionId !== args.sessionId ||
+      !RESUMABLE_PHASES.includes(existing.phase)
+    ) {
+      return {
+        full: false,
+        stale: true as const,
+        phase: existing?.phase ?? "terminated",
+      };
+    }
+    const now = Date.now();
+    if (
+      existing.phase === "paused" &&
+      args.maxActive !== undefined &&
+      (await countActive(ctx, args.maxActive, now)) >= args.maxActive
+    ) {
+      return { full: true };
+    }
+    await ctx.db.patch("sandboxes", existing._id, {
+      phase: "resuming",
+      updatedAt: now,
+    });
+    return { full: false };
+  },
+});
+
+/**
+ * Marks the row terminated after `destroy` closed `closed`. A create still in
+ * flight keeps its lease, so its slot stays counted and other creates wait for
+ * it, but `complete` then rejects it. A row that points at a session `destroy`
+ * never closed is returned unchanged.
+ */
+export const release = mutation({
+  args: { ...identity, closed: v.array(v.string()) },
+  returns: v.union(sandboxValidator, v.null()),
+  handler: async (ctx, args) => {
+    const existing = await find(ctx, args.ownerId, args.key);
+    if (!existing) return null;
+    if (existing.sessionId && !args.closed.includes(existing.sessionId)) {
+      return existing;
+    }
+    const now = Date.now();
+    const inFlight =
+      !existing.sessionId &&
+      existing.claim !== undefined &&
+      existing.claim.expiresAt >= now;
+    await ctx.db.patch("sandboxes", existing._id, {
+      phase: "terminated",
+      claim: inFlight ? existing.claim : undefined,
+      previews: undefined,
+      updatedAt: now,
     });
     return (await ctx.db.get("sandboxes", existing._id))!;
   },
@@ -212,7 +313,17 @@ const ACTIVE_PHASES = ["ready", "pausing", "resuming", "provisioning"] as const;
 
 /** Counts active sandboxes, including creates in flight, up to `limit`. */
 async function countActive(ctx: QueryCtx, limit: number, now: number) {
-  let count = 0;
+  // A create that destroy cancelled keeps its slot until it winds down.
+  const cancelled = await ctx.db
+    .query("sandboxes")
+    .withIndex("by_phase_updated", (q) =>
+      q.eq("phase", "terminated").gte("updatedAt", now - MAX_LEASE_MS),
+    )
+    // eslint-disable-next-line @convex-dev/no-filter-in-query
+    .filter((q) => q.gte(q.field("claim.expiresAt"), now))
+    .take(limit);
+  let count = cancelled.length;
+  if (count >= limit) return count;
   for (const phase of ACTIVE_PHASES) {
     const rows = await ctx.db
       .query("sandboxes")

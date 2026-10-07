@@ -132,17 +132,33 @@ function SandboxPanel({ sandbox, title }: { sandbox: Sandbox; title: string }) {
     }
   };
 
-  // A pause started without waiting settles in the background; poll until it does.
+  // Tenki pauses the sandbox at its deadline, before the row says so.
+  const deadline = sandbox.remote?.timeoutAt;
+  const [overdue, setOverdue] = useState(false);
   useEffect(() => {
-    if (sandbox.phase !== "pausing") return;
+    if (!deadline) return setOverdue(false);
+    const ms = deadline - Date.now();
+    setOverdue(ms <= 0);
+    if (ms <= 0) return;
+    const timer = setTimeout(() => setOverdue(true), ms);
+    return () => clearTimeout(timer);
+  }, [deadline]);
+
+  // A pause started without waiting, or one Tenki starts at the deadline, settles
+  // in the background; poll until the row catches up.
+  const settling =
+    sandbox.phase === "pausing" || (sandbox.phase === "ready" && overdue);
+  useEffect(() => {
+    if (!settling) return;
+    void refresh({ key }).catch(() => {});
     const timer = setInterval(
       () => void refresh({ key }).catch(() => {}),
       5_000,
     );
     return () => clearInterval(timer);
-  }, [sandbox.phase, key, refresh]);
+  }, [settling, key, refresh]);
 
-  const ready = sandbox.phase === "ready";
+  const ready = sandbox.phase === "ready" && !overdue;
   return (
     <section className="card">
       <div className="row">
@@ -188,14 +204,15 @@ function SandboxPanel({ sandbox, title }: { sandbox: Sandbox; title: string }) {
         </button>
       </div>
       {error && <p className="error">{error}</p>}
-      {sandbox.previews?.map((p) => (
-        <p key={p.port} className="preview">
-          Port {p.port} is live at{" "}
-          <a href={p.url} target="_blank" rel="noreferrer">
-            {p.url}
-          </a>
-        </p>
-      ))}
+      {ready &&
+        sandbox.previews?.map((p) => (
+          <p key={p.port} className="preview">
+            Port {p.port} is live at{" "}
+            <a href={p.url} target="_blank" rel="noreferrer">
+              {p.url}
+            </a>
+          </p>
+        ))}
       {ready && <Terminal sandboxKey={key} />}
     </section>
   );

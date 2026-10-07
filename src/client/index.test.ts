@@ -3,8 +3,13 @@ import { anyApi, actionGeneric, type ApiFromModules } from "convex/server";
 import { ConvexError, v } from "convex/values";
 import { beforeEach, describe, expect, test } from "vitest";
 import { MAX_EXEC_TIMEOUT_MS, Tenki } from "./index.js";
-import { adoptionTag, SPAWN_SCRIPT } from "./internal.js";
-import { FakeSdk, sdkError, text } from "./fake.test.js";
+import {
+  adoptionTag,
+  cappedArgv,
+  describeError,
+  SPAWN_SCRIPT,
+} from "./internal.js";
+import { FakeSdk, sdkError, text, type FakeSession } from "./fake.test.js";
 import { components, initConvexTest } from "./setup.test.js";
 
 let fake = new FakeSdk();
@@ -62,9 +67,13 @@ export const forkCapped = actionGeneric({
 });
 
 export const op = actionGeneric({
-  args: { method: v.string(), args: v.any() },
-  handler: async (ctx, { method, args }) => {
-    const client = tenki() as unknown as Record<
+  args: { method: v.string(), args: v.any(), config: v.optional(v.any()) },
+  handler: async (ctx, { method, args, config }) => {
+    const client = new Tenki(components.tenki, {
+      client: fake,
+      namespace: NS,
+      ...config,
+    }) as unknown as Record<
       string,
       (ctx: unknown, args: unknown) => Promise<unknown>
     >;
@@ -246,11 +255,9 @@ describe("exec", () => {
       stdoutTruncated: false,
       timedOut: false,
     });
-    expect(fake.sessions.get(sessionId!)!.argv[0]).toEqual([
-      "bash",
-      "-lc",
-      "echo ok && pwd",
-    ]);
+    expect(fake.sessions.get(sessionId!)!.argv[0]).toEqual(
+      cappedArgv(["bash", "-lc", "echo ok && pwd"], (1 << 20) + 1),
+    );
   });
 
   test("passes argv through and caps the timeout", async () => {
@@ -260,9 +267,16 @@ describe("exec", () => {
       ...alice,
       command: ["ls", "-la"],
       timeoutMs: 60 * 60_000,
+      maxOutputBytes: 10,
     });
-    expect(fake.sessions.get(sessionId!)!.argv[0]).toEqual(["ls", "-la"]);
+    expect(fake.sessions.get(sessionId!)!.argv[0]).toEqual(
+      cappedArgv(["ls", "-la"], 11),
+    );
     expect(fake.execOptions[0]).toMatchObject({
+      timeoutMs: MAX_EXEC_TIMEOUT_MS,
+    });
+    await t.action(api.exec, { ...alice, command: ["ls"], timeoutMs: 0 });
+    expect(fake.execOptions[1]).toMatchObject({
       timeoutMs: MAX_EXEC_TIMEOUT_MS,
     });
   });
@@ -345,6 +359,39 @@ describe("refresh and destroy", () => {
     expect(again.sessionId).not.toBe(sessionId);
   });
 
+  test("destroy closes a session a create recorded after destroy listed", async () => {
+    const t = initConvexTest();
+    fake.createDelayMs = 50;
+    const realList = fake.list.bind(fake);
+    let calls = 0;
+    let createDone!: () => void;
+    const createFinished = new Promise<void>((r) => (createDone = r));
+    fake.list = async (options) => {
+      const sessions = await realList(options);
+      // destroy's listing comes back from before the create's session existed.
+      if (++calls === 2) await createFinished;
+      return sessions;
+    };
+    const created = t.action(api.create, alice);
+    void created.finally(createDone);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(await t.action(api.destroy, alice)).toMatchObject({
+      phase: "terminated",
+    });
+    const { sessionId } = await created;
+    expect(fake.sessions.get(sessionId!)!.state).toBe("TERMINATING");
+  });
+
+  test("refresh clears previews once the session is gone", async () => {
+    const t = initConvexTest();
+    const { sessionId } = await t.action(api.create, alice);
+    await call(t, "exposePort", { port: 8080 });
+    fake.sessions.delete(sessionId!);
+    const after = await t.action(api.refresh, alice);
+    expect(after?.phase).toBe("terminated");
+    expect(after?.previews).toBeUndefined();
+  });
+
   test("destroy of an unknown identity is a no-op", async () => {
     const t = initConvexTest();
     expect(await t.action(api.destroy, alice)).toBeNull();
@@ -355,7 +402,13 @@ const call = (
   t: ReturnType<typeof initConvexTest>,
   method: string,
   args: Record<string, unknown> = {},
-) => t.action(api.op, { method, args: { ...alice, ...args } }) as Promise<any>;
+  config?: Record<string, unknown>,
+) =>
+  t.action(api.op, {
+    method,
+    args: { ...alice, ...args },
+    config,
+  }) as Promise<any>;
 const row = (t: ReturnType<typeof initConvexTest>) =>
   t.query(components.tenki.sandboxes.get, alice);
 const reply = (stdout: string, exitCode = 0) => ({
@@ -516,6 +569,7 @@ describe("files, ports and lifetime", () => {
       { port: 8080, url: "https://b-8080.preview.test" },
     ]);
     await t.action(api.destroy, alice);
+    expect((await row(t))?.previews).toBeUndefined();
     expect((await t.action(api.create, alice)).previews).toBeUndefined();
   });
 
@@ -537,7 +591,10 @@ describe("snapshots and fork", () => {
       name: "before-refactor",
     });
     expect(fake.snapshots).toEqual([
-      { sessionId: source.sessionId, options: { name: "before-refactor" } },
+      {
+        sessionId: source.sessionId,
+        options: { name: "before-refactor", expiresAt: expect.any(Date) },
+      },
     ]);
     expect(fake.creates.at(-1)).toMatchObject({ snapshotId: "snap-1" });
     expect(forked).toMatchObject({ key: "experiment", phase: "ready" });
@@ -696,5 +753,455 @@ describe("review fixes", () => {
     await reconcileOne();
     await reconcileOne();
     expect((await row(t))?.phase).toBe("paused");
+  });
+});
+
+/** Makes a fake session resume the way Tenki does: only from PAUSED, and not instantly. */
+function resumeLikeTenki(s: FakeSession, resumeMs = 100) {
+  const wait = async (state: string) => {
+    for (let i = 0; i < 100 && s.state !== state; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    if (s.state !== state) throw new Error(`timeout waiting for ${state}`);
+  };
+  s.resume = async () => {
+    if (s.state === "RUNNING") return;
+    if (s.state !== "PAUSED") {
+      throw sdkError(
+        "InvalidStateError",
+        `[failed_precondition] cannot resume session in current state ${s.state}`,
+      );
+    }
+    s.state = "RESUMING";
+    setTimeout(() => (s.state = "RUNNING"), resumeMs);
+  };
+  s.waitResumed = async () => await wait("RUNNING");
+  s.waitPaused = async () => await wait("PAUSED");
+}
+
+describe("create on an existing sandbox", () => {
+  test("concurrent creates on a paused sandbox both get it ready", async () => {
+    const t = initConvexTest();
+    const { sessionId } = await t.action(api.create, alice);
+    await call(t, "pause");
+    resumeLikeTenki(fake.sessions.get(sessionId!)!);
+    const results = await Promise.all([
+      t.action(api.create, alice),
+      t.action(api.create, alice),
+    ]);
+    expect(results.map((r) => [r.phase, r.sessionId])).toEqual([
+      ["ready", sessionId],
+      ["ready", sessionId],
+    ]);
+  });
+
+  test("a create while Tenki is still pausing at the deadline waits and resumes", async () => {
+    const t = initConvexTest();
+    fake.lifetimeMs = 1;
+    const { sessionId } = await t.action(api.create, alice);
+    await new Promise((r) => setTimeout(r, 5));
+    const s = fake.sessions.get(sessionId!)!;
+    resumeLikeTenki(s);
+    s.state = "PAUSING";
+    setTimeout(() => (s.state = "PAUSED"), 300);
+    expect(await t.action(api.create, alice)).toMatchObject({
+      phase: "ready",
+      sessionId,
+    });
+    expect(s.state).toBe("RUNNING");
+  });
+
+  test("a resume whose first request was ambiguous still finishes", async () => {
+    const t = initConvexTest();
+    const { sessionId } = await t.action(api.create, alice);
+    await call(t, "pause");
+    const s = fake.sessions.get(sessionId!)!;
+    // Slower than the first retry, so the retry finds the session still RESUMING.
+    resumeLikeTenki(s, 3000);
+    const resume = s.resume;
+    let calls = 0;
+    s.resume = async () => {
+      await resume();
+      // Tenki committed RESUMING, then lost track of the dispatch.
+      if (++calls === 1)
+        throw sdkError("SandboxError", "[unavailable] resume dispatch failed");
+    };
+    expect((await call(t, "resume")).phase).toBe("ready");
+    expect((await row(t))?.phase).toBe("ready");
+  }, 15_000);
+
+  test("resumes a paused sandbox, or returns it as is with resume: false", async () => {
+    const t = initConvexTest();
+    const { sessionId } = await t.action(api.create, alice);
+    await call(t, "pause");
+    expect((await call(t, "create", { resume: false })).phase).toBe("paused");
+    expect(await call(t, "create")).toMatchObject({
+      phase: "ready",
+      sessionId,
+    });
+    expect(fake.creates).toHaveLength(1);
+  });
+
+  test("resumes a sandbox Tenki paused at its deadline, retrying while unavailable", async () => {
+    const t = initConvexTest();
+    fake.lifetimeMs = 1;
+    const { sessionId } = await t.action(api.create, alice);
+    await new Promise((r) => setTimeout(r, 5));
+    fake.sessions.get(sessionId!)!.state = "PAUSED";
+    fake.resumeErrors = [
+      sdkError(
+        "SandboxError",
+        "[unavailable] paused source is still being torn down, retry shortly",
+      ),
+    ];
+    expect(await t.action(api.create, alice)).toMatchObject({
+      phase: "ready",
+      sessionId,
+    });
+    expect(fake.resumeErrors).toHaveLength(0);
+    expect(fake.creates).toHaveLength(1);
+  });
+
+  test("replaces a sandbox that ended behind the row's back", async () => {
+    const t = initConvexTest();
+    const first = await t.action(api.create, alice);
+    await call(t, "pause");
+    fake.sessions.delete(first.sessionId!);
+    const again = await t.action(api.create, alice);
+    expect(again.phase).toBe("ready");
+    expect(again.sessionId).not.toBe(first.sessionId);
+    expect(fake.creates).toHaveLength(2);
+  });
+
+  test("tags in the reserved cvx: prefix are refused", async () => {
+    const t = initConvexTest();
+    // Tenki trims and lowercases tags, so padded forms would become cvx: tags too.
+    for (const tag of [
+      "CVX:0123",
+      " cvx:0123",
+      "\tcvx:0123",
+      " cvx:0123",
+      "\u0085cvx:0123",
+    ]) {
+      expect(
+        await convexErrorData(t.action(api.create, { ...alice, tags: [tag] })),
+      ).toMatchObject({ code: "invalid_argument" });
+    }
+    expect(await row(t)).toBeNull();
+    expect(
+      (
+        await t.action(api.create, {
+          ...alice,
+          tags: ["Team-A", "cvx-e2e:run1"],
+        })
+      ).phase,
+    ).toBe("ready");
+    expect(fake.creates[0].tags).toContain("Team-A");
+  });
+
+  test("destroy during a create cancels it and closes its session", async () => {
+    const t = initConvexTest();
+    let destroyed: unknown;
+    fake.onCreate = async () => {
+      destroyed = await t.action(api.destroy, alice);
+    };
+    expect(await convexErrorData(t.action(api.create, alice))).toMatchObject({
+      code: "terminated",
+    });
+    expect(destroyed).toMatchObject({ phase: "terminated" });
+    expect([...fake.sessions.values()].map((s) => s.state)).toEqual([
+      "TERMINATING",
+    ]);
+    expect((await row(t))?.phase).toBe("terminated");
+
+    fake.onCreate = undefined;
+    expect((await t.action(api.create, alice)).phase).toBe("ready");
+  });
+
+  test("a cancelled create never closes a session a newer create picked up", async () => {
+    const t = initConvexTest();
+    fake.onCreate = async () => {
+      fake.onCreate = undefined;
+      await t.action(api.destroy, alice);
+    };
+    const realCreate = fake.create.bind(fake);
+    let newer: Promise<{ phase: string; sessionId?: string }> | undefined;
+    fake.create = async (options) => {
+      fake.create = realCreate;
+      const session = (await realCreate(options)) as FakeSession;
+      const close = session.close;
+      session.close = async () => {
+        // A new create arrives just as the cancelled one closes its session.
+        newer = t.action(api.create, alice);
+        await new Promise((r) => setTimeout(r, 50));
+        await close();
+      };
+      return session;
+    };
+    expect(await convexErrorData(t.action(api.create, alice))).toMatchObject({
+      code: "terminated",
+    });
+    const sandbox = await newer!;
+    expect(sandbox.phase).toBe("ready");
+    expect(fake.sessions.get(sandbox.sessionId!)?.state).toBe("RUNNING");
+    expect((await row(t))?.sessionId).toBe(sandbox.sessionId);
+  });
+
+  test("a create waiting on one that destroy cancels gets a new sandbox", async () => {
+    const t = initConvexTest();
+    fake.createDelayMs = 200;
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const holder = convexErrorData(t.action(api.create, alice));
+    await sleep(30);
+    const waiter = t.action(api.create, alice);
+    await sleep(30);
+    await t.action(api.destroy, alice);
+    expect(await holder).toMatchObject({ code: "terminated" });
+    const sandbox = await waiter;
+    expect(sandbox.phase).toBe("ready");
+    expect(fake.sessions.get(sandbox.sessionId!)?.state).toBe("RUNNING");
+  });
+});
+
+describe("limits", () => {
+  const capped = { maxActiveSandboxes: 1 };
+
+  test("readiness waits stop before the action limit", async () => {
+    const t = initConvexTest();
+    await call(t, "create", { options: { waitTimeoutMs: 60 * 60_000 } });
+    expect(fake.creates[0].waitTimeoutMs).toBe(8 * 60_000);
+  });
+
+  test("a create's lease lasts 5 minutes", async () => {
+    const t = initConvexTest();
+    let leaseMs = 0;
+    fake.onCreate = async () => {
+      leaseMs = (await row(t))!.claim!.expiresAt - Date.now();
+    };
+    await t.action(api.create, alice);
+    expect(leaseMs).toBeGreaterThan(4 * 60_000);
+    expect(leaseMs).toBeLessThanOrEqual(5 * 60_000);
+  });
+
+  test("a huge maxOutputBytes reaches head as a plain integer", async () => {
+    const t = initConvexTest();
+    const { sessionId } = await t.action(api.create, alice);
+    await t.action(api.exec, {
+      ...alice,
+      command: ["true"],
+      maxOutputBytes: Number.MAX_VALUE,
+    });
+    expect(fake.sessions.get(sessionId!)!.argv[0][4]).toMatch(/^\d+$/);
+  });
+
+  test("a create that destroy cancels keeps its slot until it winds down", async () => {
+    const t = initConvexTest();
+    let open!: () => void;
+    const gate = new Promise<void>((r) => (open = r));
+    fake.onCreate = async () => {
+      fake.onCreate = undefined;
+      await gate;
+    };
+    const aliceCreate = convexErrorData(call(t, "create", {}, capped));
+    while ((await row(t))?.phase !== "provisioning") {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    expect((await call(t, "destroy", {}, capped))?.phase).toBe("terminated");
+    // Alice's VM is still being created, so the cap of 1 is full.
+    expect(
+      await convexErrorData(call(t, "create", { ownerId: "user_bob" }, capped)),
+    ).toMatchObject({ code: "capacity_exceeded" });
+    open();
+    expect(await aliceCreate).toMatchObject({ code: "terminated" });
+    expect(
+      (await call(t, "create", { ownerId: "user_bob" }, capped)).phase,
+    ).toBe("ready");
+    expect(
+      [...fake.sessions.values()].filter((s) => s.state === "RUNNING"),
+    ).toHaveLength(1);
+  });
+
+  test("resuming a paused sandbox counts against maxActiveSandboxes", async () => {
+    const t = initConvexTest();
+    await call(t, "create", {}, capped);
+    await call(t, "pause", {}, capped);
+    await call(t, "create", { ownerId: "user_bob" }, capped);
+    expect(await convexErrorData(call(t, "resume", {}, capped))).toMatchObject({
+      code: "capacity_exceeded",
+    });
+    expect(await convexErrorData(call(t, "create", {}, capped))).toMatchObject({
+      code: "capacity_exceeded",
+    });
+    expect((await row(t))?.phase).toBe("paused");
+  });
+
+  test("readFile refuses files over maxBytes before reading them", async () => {
+    const t = initConvexTest();
+    await t.action(api.create, alice);
+    await call(t, "writeFile", { path: "/big", data: "x".repeat(20) });
+    expect(
+      await convexErrorData(
+        call(t, "readFile", { path: "/big", maxBytes: 10 }),
+      ),
+    ).toMatchObject({ code: "file_too_large", size: 20 });
+  });
+});
+
+describe("fork", () => {
+  test("a fork whose snapshot can't be read fails and frees the target", async () => {
+    const t = initConvexTest();
+    await t.action(api.create, alice);
+    fake.getSnapshot = async () => {
+      throw sdkError("SnapshotNotFoundError", "[not_found] snapshot not found");
+    };
+    expect(
+      await convexErrorData(call(t, "fork", { from: "main", to: "fork" })),
+    ).toMatchObject({ code: "snapshot_not_found" });
+    const target = await t.query(components.tenki.sandboxes.get, {
+      ...alice,
+      key: "fork",
+    });
+    expect(target).toMatchObject({ phase: "error" });
+    expect(target?.claim).toBeUndefined();
+  });
+
+  test("a fork refused at the cap takes no snapshot", async () => {
+    const t = initConvexTest();
+    const capped = { maxActiveSandboxes: 1 };
+    await call(t, "create", {}, capped);
+    for (let i = 0; i < 3; i++) {
+      expect(
+        await convexErrorData(
+          call(t, "fork", { from: "main", to: "fork" }, capped),
+        ),
+      ).toMatchObject({ code: "capacity_exceeded" });
+    }
+    expect(fake.snapshots).toHaveLength(0);
+  });
+
+  test("concurrent forks into one target take one snapshot", async () => {
+    const t = initConvexTest();
+    await t.action(api.create, alice);
+    const results = await Promise.allSettled(
+      [1, 2, 3].map(() => call(t, "fork", { from: "main", to: "fork" })),
+    );
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect(fake.snapshots).toHaveLength(1);
+  });
+
+  test("a create of the target during a fork gets the forked sandbox", async () => {
+    const t = initConvexTest();
+    await t.action(api.create, alice);
+    const realSnapshot = fake.createSnapshotAndWait.bind(fake);
+    let racing: Promise<{ sessionId?: string }> | undefined;
+    fake.createSnapshotAndWait = async (id, options) => {
+      racing = call(t, "create", { key: "fork" });
+      await new Promise((r) => setTimeout(r, 50));
+      return await realSnapshot(id, options);
+    };
+    const forked = await call(t, "fork", { from: "main", to: "fork" });
+    expect((await racing!).sessionId).toBe(forked.sessionId);
+    expect(fake.creates.at(-1)).toMatchObject({ snapshotId: "snap-1" });
+  });
+
+  test("refuses a live target and expires its snapshot", async () => {
+    const t = initConvexTest();
+    await t.action(api.create, alice);
+    await call(t, "fork", { from: "main", to: "fork" });
+    expect(
+      fake.snapshots[0].options!.expiresAt!.getTime() - Date.now(),
+    ).toBeGreaterThan(50 * 60_000);
+    expect(
+      await convexErrorData(call(t, "fork", { from: "main", to: "fork" })),
+    ).toMatchObject({ code: "already_exists" });
+    expect(fake.snapshots).toHaveLength(1);
+
+    await call(t, "destroy", { key: "fork" });
+    expect((await call(t, "fork", { from: "main", to: "fork" })).phase).toBe(
+      "ready",
+    );
+    expect(fake.snapshots).toHaveLength(2);
+  });
+
+  test("a snapshot restore takes the snapshot's size, not the defaults", async () => {
+    const t = initConvexTest();
+    const config = {
+      defaults: {
+        cpuCores: 2,
+        memoryMb: 4096,
+        image: "ubuntu:24.04",
+        allowDomains: ["pypi.org"],
+        tags: ["team-a"],
+      },
+    };
+    await call(
+      t,
+      "create",
+      { options: { cpuCores: 4, memoryMb: 8192 } },
+      config,
+    );
+    const forked = await call(t, "fork", { from: "main", to: "fork" }, config);
+    const restore = fake.creates.at(-1)!;
+    expect(restore).toMatchObject({
+      snapshotId: "snap-1",
+      cpuCores: 4,
+      memoryMb: 8192,
+      allowDomains: ["pypi.org"],
+    });
+    expect(restore.tags).toContain("team-a");
+    expect(restore).not.toHaveProperty("image");
+    expect(forked.remote).toMatchObject({ cpuCores: 4, memoryMb: 8192 });
+  });
+});
+
+describe("errors", () => {
+  test("generic SDK errors get specific codes", () => {
+    const code = (err: Error) => describeError(err).code;
+    expect(
+      code(sdkError("SandboxError", "[invalid_argument] validation error")),
+    ).toBe("invalid_argument");
+    expect(code(sdkError("SandboxError", "[unavailable] retry shortly"))).toBe(
+      "unavailable",
+    );
+    expect(
+      code(
+        sdkError(
+          "SandboxError",
+          "[unknown] session entered terminal state: TERMINATING",
+        ),
+      ),
+    ).toBe("terminated");
+    expect(code(new Error("session entered terminal state: TERMINATED"))).toBe(
+      "terminated",
+    );
+    expect(code(sdkError("SnapshotNotFoundError"))).toBe("snapshot_not_found");
+    expect(
+      code(
+        sdkError(
+          "SandboxError",
+          "[unknown] timeout waiting for session s1 to become ready",
+        ),
+      ),
+    ).toBe("timeout");
+    expect(code(new Error("boom"))).toBe("internal");
+  });
+
+  test("spawn_failed says why when the guest prints nothing", async () => {
+    const t = initConvexTest();
+    await t.action(api.create, alice);
+    fake.onExec = () => ({ ...reply(""), exitCode: 1 });
+    expect(
+      await convexErrorData(call(t, "spawn", { command: "true" })),
+    ).toMatchObject({
+      code: "spawn_failed",
+      message: "spawn exited with 1 (exit)",
+    });
+  });
+
+  test("a session one read can't find isn't marked terminated", async () => {
+    const t = initConvexTest();
+    const { sessionId } = await t.action(api.create, alice);
+    fake.lagging.add(sessionId!);
+    expect((await t.action(api.refresh, alice))?.phase).toBe("ready");
   });
 });

@@ -37,13 +37,24 @@ export class FakeSdk implements SandboxClient {
   sessions = new Map<string, FakeSession>();
   creates: CreateOptions[] = [];
   snapshots: { sessionId: string; options?: CreateSnapshotOptions }[] = [];
+  private snapshotSizes = new Map<
+    string,
+    { cpuCores: number; memoryMb: number }
+  >();
   createDelayMs = 0;
+  lifetimeMs = 30 * 60_000;
   failCreate?: Error;
+  /** Runs inside `create` after any delay, before the session exists. */
+  onCreate?: () => Promise<void>;
   /** Thrown by `create` after the session exists, carrying it like WaitReadyFailedError. */
   failCreateAfterSession?: string;
   failWaitReady?: Error;
   failPause?: Error;
   failResume?: Error;
+  /** Errors `resume` throws, one per call, before it succeeds. */
+  resumeErrors: Error[] = [];
+  /** Session ids whose next `get` misses, as a lagging replica would. */
+  lagging = new Set<string>();
   execResult: ExecReply = {
     exitCode: 0,
     stdout: text("ok\n"),
@@ -70,6 +81,7 @@ export class FakeSdk implements SandboxClient {
     this.creates.push(options);
     if (this.createDelayMs)
       await new Promise((r) => setTimeout(r, this.createDelayMs));
+    await this.onCreate?.();
     if (this.failCreate) throw this.failCreate;
     if (this.failCreateAfterSession) {
       const stuck = this.make(
@@ -89,11 +101,14 @@ export class FakeSdk implements SandboxClient {
       options.metadata ?? {},
       "RUNNING",
     );
+    session.cpuCores = options.cpuCores ?? session.cpuCores;
+    session.memoryMb = options.memoryMb ?? session.memoryMb;
     this.sessions.set(session.id, session);
     return session;
   }
 
   async get(sessionId: string): Promise<SandboxSession> {
+    if (this.lagging.delete(sessionId)) throw sdkError("SessionNotFoundError");
     const session = this.sessions.get(sessionId);
     if (!session) throw sdkError("SessionNotFoundError");
     return session;
@@ -112,7 +127,19 @@ export class FakeSdk implements SandboxClient {
     options?: CreateSnapshotOptions,
   ) {
     this.snapshots.push({ sessionId, options });
-    return { id: `snap-${this.snapshots.length}` };
+    const id = `snap-${this.snapshots.length}`;
+    const source = this.sessions.get(sessionId)!;
+    this.snapshotSizes.set(id, {
+      cpuCores: source.cpuCores,
+      memoryMb: source.memoryMb,
+    });
+    return { id };
+  }
+
+  async getSnapshot(snapshotId: string) {
+    const size = this.snapshotSizes.get(snapshotId);
+    if (!size) throw sdkError("SnapshotNotFoundError", "snapshot not found");
+    return size;
   }
 
   private make(
@@ -125,7 +152,7 @@ export class FakeSdk implements SandboxClient {
     const session: FakeSession = {
       id,
       state: state as SandboxSession["state"],
-      timeoutAt: new Date(Date.now() + 30 * 60_000),
+      timeoutAt: new Date(Date.now() + this.lifetimeMs),
       cpuCores: 2,
       memoryMb: 4096,
       diskSizeGb: 20,
@@ -158,17 +185,19 @@ export class FakeSdk implements SandboxClient {
         session.state = "RUNNING";
       },
       async pause() {
-        // A failed pause reverts the session to RUNNING, as PauseFailedError reports.
-        if (sdk().failPause) throw sdk().failPause;
         session.state = "PAUSING";
       },
       async waitPaused() {
         session.state = "PAUSED";
       },
       async pauseAsync() {
+        // A failed pause reverts the session to RUNNING, as PauseFailedError reports.
+        if (sdk().failPause) throw sdk().failPause;
         session.state = "PAUSING";
       },
       async resume() {
+        const err = sdk().resumeErrors.shift();
+        if (err) throw err;
         session.state = "RESUMING";
       },
       async waitResumed() {
@@ -181,6 +210,17 @@ export class FakeSdk implements SandboxClient {
       },
       async extend(ms) {
         session.timeoutAt = new Date(session.timeoutAt.getTime() + ms);
+      },
+      async stat(path) {
+        const data = session.files.get(path);
+        if (!data) throw sdkError("FileNotFoundError", path);
+        return {
+          path,
+          size: BigInt(data.byteLength),
+          mode: 0o644,
+          isDir: false,
+          modifiedUnixNs: 0n,
+        };
       },
       async readFile(path) {
         const data = session.files.get(path);

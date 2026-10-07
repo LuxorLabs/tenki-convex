@@ -4,6 +4,9 @@ on:
     - cron: "41 * * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   sweep:
     name: Terminate leftover e2e sandboxes

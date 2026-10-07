@@ -1,10 +1,11 @@
 // @vitest-environment node
-import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "vitest";
 import {
+  cappedArgv,
   KILL_SCRIPT,
   newProcessId,
   parseStatus,
@@ -95,8 +96,143 @@ test.skipIf(!isLinux)(
       "-c",
       `kill -- -$(cat "${join(procHome, ".tenki-convex/proc", moved, "pid")}")`,
     ]);
+
+    // Children the command leaves behind keep it running, and kill reaches them.
+    const daemon = newProcessId();
+    run(SPAWN_SCRIPT, {
+      TENKI_CVX_ID: daemon,
+      TENKI_CVX_CMD: "sleep 30 & exit 0",
+    });
+    await settle();
+    expect(status(daemon)).toMatchObject({ state: "running" });
+    expect(
+      run(KILL_SCRIPT, {
+        TENKI_CVX_ID: daemon,
+        TENKI_CVX_SIGNAL: "TERM",
+      }).trim(),
+    ).toBe("signaled");
+    await settle();
+    expect(status(daemon)).toMatchObject({ state: "exited", exitCode: 0 });
+
+    // INT and HUP reach the process where env can restore their handlers.
+    const canReset =
+      spawnSync("env", ["--default-signal=INT", "true"]).status === 0;
+    for (const signal of canReset ? ["INT", "HUP"] : []) {
+      const id = newProcessId();
+      run(SPAWN_SCRIPT, { TENKI_CVX_ID: id, TENKI_CVX_CMD: "sleep 30" });
+      await settle();
+      expect(
+        run(KILL_SCRIPT, { TENKI_CVX_ID: id, TENKI_CVX_SIGNAL: signal }).trim(),
+      ).toBe("signaled");
+      await settle();
+      expect(status(id)).toMatchObject({ state: "killed", signal });
+    }
   },
 );
+
+test.skipIf(!isLinux)(
+  "a record from before a restart never counts, even when its pid leads another spawn's group",
+  async () => {
+    const procHome = execFileSync("sh", [
+      "-c",
+      'getent passwd "$(id -u)" | cut -d: -f6',
+    ])
+      .toString()
+      .trim();
+    const run = (script: string, env: Record<string, string>) =>
+      execFileSync("bash", ["-c", script], {
+        env: { PATH: process.env.PATH, ...env },
+      }).toString();
+    const status = (id: string) =>
+      parseStatus(
+        run(STATUS_SCRIPT, { TENKI_CVX_ID: id, TENKI_CVX_TAIL: "100" }),
+        100,
+      );
+    const marker = `tenki-cvx-daemon-${process.pid}`;
+    const other = newProcessId();
+    run(SPAWN_SCRIPT, {
+      TENKI_CVX_ID: other,
+      TENKI_CVX_CMD: `exec -a ${marker} sleep 30 & exit 0`,
+    });
+    await new Promise((r) => setTimeout(r, 500));
+    const pid = readFileSync(
+      join(procHome, ".tenki-convex/proc", other, "pid"),
+      "utf8",
+    );
+    // A record written before a restart, whose pid now leads the other spawn's group.
+    const stale = newProcessId();
+    const dir = join(procHome, ".tenki-convex/proc", stale);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "pid"), pid);
+    writeFileSync(join(dir, "start"), "1\n");
+    writeFileSync(join(dir, "boot"), "00000000-0000-0000-0000-000000000000\n");
+    writeFileSync(join(dir, "log"), "");
+    try {
+      expect(status(stale)).toMatchObject({ state: "lost" });
+      expect(
+        run(KILL_SCRIPT, {
+          TENKI_CVX_ID: stale,
+          TENKI_CVX_SIGNAL: "TERM",
+        }).trim(),
+      ).toBe("gone");
+      expect(status(other)).toMatchObject({ state: "running" });
+    } finally {
+      spawnSync("pkill", ["-f", marker]);
+    }
+  },
+);
+
+test("exec output is capped per stream inside the sandbox, keeping the exit code", () => {
+  const [bash, ...args] = cappedArgv(
+    ["bash", "-c", "head -c 100000 /dev/zero; echo oops >&2; exit 3"],
+    5,
+  );
+  const r = spawnSync(bash, args);
+  expect(r.status).toBe(3);
+  expect(r.stdout.byteLength).toBe(5);
+  expect(r.stderr.toString()).toBe("oops\n");
+  const argv = spawnSync(
+    bash,
+    cappedArgv(["printf", "%s", "a b"], 100).slice(1),
+  );
+  expect(argv.stdout.toString()).toBe("a b");
+});
+
+test("a command that writes past the cap itself keeps its own exit code", () => {
+  const [bash, ...args] = cappedArgv(["head", "-c", "100000", "/dev/zero"], 5);
+  const r = spawnSync(bash, args);
+  expect(r.status).toBe(0);
+  expect(r.stdout.byteLength).toBe(5);
+});
+
+test("argv runs a program, never the wrapper's shell builtins", () => {
+  for (const argv of [["cap"], ["shopt"]]) {
+    const [bash, ...args] = cappedArgv(argv, 100);
+    expect(spawnSync(bash, args).status).toBe(127);
+  }
+});
+
+// The guest agent ends a timed-out command by signalling only the process it started.
+test("signalling the started process ends the command and keeps its output", async () => {
+  const marker = `tenki-cvx-test-${process.pid}`;
+  const [bash, ...args] = cappedArgv(
+    ["bash", "-c", `echo hi; exec -a ${marker} sleep 30`],
+    1 << 20,
+  );
+  const child = spawn(bash, args);
+  let out = "";
+  child.stdout.on("data", (b) => (out += b));
+  const closed = new Promise((r) => child.on("close", r));
+  await new Promise((r) => setTimeout(r, 500));
+  child.kill("SIGTERM");
+  const ended = await Promise.race([
+    closed.then(() => true),
+    new Promise((r) => setTimeout(() => r(false), 5000)),
+  ]);
+  const left = spawnSync("pgrep", ["-f", marker]).stdout.toString().trim();
+  if (left) spawnSync("pkill", ["-f", marker]);
+  expect({ ended, out, left }).toEqual({ ended: true, out: "hi\n", left: "" });
+}, 10_000);
 
 test("an exit file caught mid-write reads as still running", () => {
   expect(parseStatus("exited  12\nout", 100)).toMatchObject({

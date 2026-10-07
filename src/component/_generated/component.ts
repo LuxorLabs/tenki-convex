@@ -24,6 +24,24 @@ import type { FunctionReference } from "convex/server";
 export type ComponentApi<Name extends string | undefined = string | undefined> =
   {
     sandboxes: {
+      beginResume: FunctionReference<
+        "mutation",
+        "internal",
+        { key: string; maxActive?: number; ownerId: string; sessionId: string },
+        {
+          full: boolean;
+          phase?:
+            | "provisioning"
+            | "ready"
+            | "pausing"
+            | "paused"
+            | "resuming"
+            | "terminated"
+            | "error";
+          stale?: true;
+        },
+        Name
+      >;
       claim: FunctionReference<
         "mutation",
         "internal",
@@ -237,6 +255,39 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           sessionId: string;
           snapshotId: string;
         },
+        Name
+      >;
+      release: FunctionReference<
+        "mutation",
+        "internal",
+        { closed: Array<string>; key: string; ownerId: string },
+        {
+          _creationTime: number;
+          _id: string;
+          claim?: { expiresAt: number; token: string };
+          key: string;
+          lastError?: { at: number; code: string; message: string };
+          ownerId: string;
+          phase:
+            | "provisioning"
+            | "ready"
+            | "pausing"
+            | "paused"
+            | "resuming"
+            | "terminated"
+            | "error";
+          previews?: Array<{ expiresAt?: number; port: number; url: string }>;
+          remote?: {
+            cpuCores: number;
+            diskSizeGb: number;
+            memoryMb: number;
+            state: string;
+            sticky: boolean;
+            timeoutAt?: number;
+          };
+          sessionId?: string;
+          updatedAt: number;
+        } | null,
         Name
       >;
       setPreview: FunctionReference<

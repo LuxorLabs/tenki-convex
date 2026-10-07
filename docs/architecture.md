@@ -47,10 +47,13 @@ retried, called concurrently, or killed halfway. `CreateSession` has no
 idempotency key, so three layers do the work:
 
 1. **Lease.** The `claim` mutation inserts the row as `provisioning` with a
-   token and a 5-minute lease, or reports the current holder. Convex runs
-   mutations serializably, so exactly one caller holds the lease. Other callers
-   wait for the row to leave `provisioning`. A terminated or failed row is
-   reclaimed so the key can be reused.
+   token and a 5-minute lease, or reports the current holder. Readiness waits
+   are capped at 8 minutes, so a slow create can outlive its lease; the next
+   caller then takes over and adopts the same tagged session, and the old holder
+   leaves that session alone. Convex runs mutations serializably, so exactly one
+   caller holds the lease. Other callers wait for the row to leave
+   `provisioning`. A terminated or failed row is reclaimed so the key can be
+   reused.
 2. **Adoption tag.** Every session is tagged
    `cvx:<sha256(namespace, ownerId, key)[:28]>`. Before creating, the lease
    holder lists sessions with that tag and adopts a live one. That recovers from
@@ -66,7 +69,22 @@ idempotency key, so three layers do the work:
 session before recording the error. That covers a session it created whose
 readiness wait failed (the SDK's error carries it) and an adopted session that
 never became ready. Otherwise the next `create` would adopt the same broken
-session again, and it would keep billing until its deadline.
+session again, and it would keep billing until its deadline. It first checks
+that the lease is still its own: a session the row records, or one another
+create holding the lease may adopt, is left alone.
+
+**Cancellation.** `destroy` closes the tagged sessions and the row's session,
+then the `release` mutation marks the row `terminated`. A create still in flight
+keeps its lease, so its slot stays counted and a new `create` waits for it. Its
+`complete` is then rejected, it closes the session it made, and only then does
+`fail` drop the lease, so no other create can adopt that session in between. The
+create throws `terminated`. If a create recorded a session `destroy` hadn't
+seen, `destroy` goes round again.
+
+**Existing rows.** A caller that finds a row already past `provisioning`
+re-reads it from Tenki unless it is `ready` with its deadline ahead. A paused
+row is resumed (unless `resume: false`), and a terminated one is reclaimed and
+created anew.
 
 **Waiting on another caller.** A caller that finds another caller holding the
 lease waits for the row to leave `provisioning`. If that create failed, the
@@ -75,8 +93,10 @@ waiting caller throws the same error, and after 3 minutes it throws
 
 **Capacity.** With `maxActiveSandboxes`, `claim` counts active rows (every live
 phase except `paused`, including in-flight creates whose lease hasn't expired)
-in the same transaction that reserves the row. Concurrent creates and forks
-can't get past the cap.
+in the same transaction that reserves the row. `beginResume` does the same
+before a paused row turns `resuming`, and a destroyed row whose create is still
+in flight keeps its slot until that create winds down. Concurrent creates, forks
+and resumes can't get past the cap.
 
 **Namespace.** The namespace defaults to the deployment's `CONVEX_CLOUD_URL`, so
 a dev and a prod deployment sharing one Tenki workspace never adopt each other's
@@ -96,16 +116,30 @@ handle.
 
 `exec` wraps a string in `bash -lc` (the SDK otherwise treats it as a program
 name). It caps the timeout at 9 minutes so the call finishes inside Convex's
-10-minute action limit, and it caps output at 1 MiB per stream so the result
-fits in a Convex value.
+10-minute action limit; 0, which the SDK reads as no timeout, also means 9
+minutes.
+
+The SDK holds a command's whole output in memory, including through `run()`, so
+output is capped in the guest: every command runs under a fixed `bash -c` script
+that points its stdout and stderr at `head -c` processes that drain the rest,
+then `exec`s the command. The guest agent signals only the process it started,
+so the command has to be that process: its timeout then reaches the command, and
+its exit status and signal are reported as before. The client asks for one byte
+more than `maxOutputBytes` (1 MiB by default) so it can flag truncation. The
+result fits in a Convex value, and a command that prints gigabytes costs the
+action nothing.
 
 ## Background processes
 
 A command run through `exec` dies when its stream ends, so `spawn` runs a fixed
-script that starts the command under `setsid nohup` and returns. Each process
-gets a directory, `<home>/.tenki-convex/proc/<processId>/`, holding:
+script that starts the command under `setsid` and returns. A background job of a
+non-interactive shell ignores `INT` and `QUIT`, so where `env --default-signal`
+exists the command starts with default signal handlers; elsewhere it falls back
+to `nohup`, and `INT` and `HUP` have no effect. Each process gets a directory,
+`<home>/.tenki-convex/proc/<processId>/`, holding:
 
-- `pid`, and `start`: the process start time read from `/proc/<pid>/stat`
+- `pid`, `start` (the process start time read from `/proc/<pid>/stat`) and
+  `boot` (the kernel's boot id)
 - `log` (combined stdout and stderr)
 - `exit` (written to a temp file and renamed into place when the command exits,
   so a status check never reads a half-written code)
@@ -115,7 +149,12 @@ gets a directory, `<home>/.tenki-convex/proc/<processId>/`, holding:
 `HOME` override in `spawn`'s `env` can't move the directory away from
 `processStatus` and `kill`. A pid only counts as the process when its current
 start time matches `start`, so after a restart a reused pid is reported as
-`lost` and is never signaled.
+`lost` and is never signaled. `setsid` makes the pid the process group id, and
+Linux doesn't reuse a pid while its group has members, so once the pid has
+exited, any process left in that group (say, a server the command started with
+`&`) keeps the status `running`, and `kill` signals the group. Nothing counts
+across a restart: the spawn records the kernel's boot id, and a record from
+another boot is `lost` even if its pid now leads someone else's group.
 
 `processStatus` and `kill` are fixed scripts too. User input reaches them only
 through environment variables, never through string interpolation. `processId`s
@@ -128,11 +167,18 @@ pause and resume, but not a guest-agent restart; it then reports `lost`.
 
 ## Pause and resume
 
-- **Pause.** A blocking `PauseSession` can return while the session is still
-  `PAUSING`; in prod it returned after about 49s. `pause` therefore also waits
-  for `PAUSED` (`waitPaused`) before syncing the row.
+- **Pause.** A blocking `PauseSession` holds one request open for the whole
+  pause (about 49s in prod) and can still return while the session is `PAUSING`.
+  `pause` starts it asynchronously and polls for `PAUSED` (`waitPaused`) before
+  syncing the row.
 - **Resume.** Resume can report success before the guest agent answers again, so
-  `resume` only marks the row `ready` after an `exec` of `true` succeeds.
+  `resume` only marks the row `ready` after an `exec` of `true` succeeds. Right
+  after a deadline pause, Tenki refuses a resume as `unavailable` until the old
+  VM is torn down (about 30s in prod), so `resume` retries that for up to 90s.
+  Tenki also refuses a resume while the sandbox is `PAUSING` or already
+  `RESUMING`, so on `invalid_state` `resume` re-reads it: it waits for a pause
+  in flight to finish and retries, and it sends nothing more when another call
+  is already resuming it.
 - **Failures.** If pausing or resuming fails or times out, the row is re-synced
   from Tenki before the error is thrown, so it never stays `pausing` or
   `resuming`.
@@ -141,15 +187,18 @@ pause and resume, but not a guest-agent restart; it then reports `lost`.
 
 ## Drift and `reconcile`
 
-Tenki ends sandboxes on its own schedule: at the deadline, used sandboxes are
-paused and unused ones are terminated. Nothing notifies Convex when that
-happens.
+Tenki ends sandboxes on its own schedule: at the deadline it pauses every
+sandbox, and it deletes a paused one after the pause retention. Nothing notifies
+Convex when that happens.
 
-Rows catch up in three ways:
+Rows catch up in four ways:
 
 - `refresh` re-reads one sandbox.
 - Any call that hits a gone session marks the row `terminated`, and an
-  `invalid_state` error re-syncs the row.
+  `invalid_state` error re-syncs the row. `GetSession` can read a lagging
+  replica, so a session is only treated as gone after a second miss a second
+  later.
+- `create` re-reads a row that isn't `ready` or whose deadline has passed.
 - `reconcile` walks the least recently updated live rows that have a session
   (index `by_phase_updated`) and refreshes them. Customers run it from a cron. A
   row it fails to refresh is touched, so it goes to the back of the queue and
@@ -157,6 +206,10 @@ Rows catch up in three ways:
 
 ## Errors
 
-The client maps SDK errors to `ConvexError({ code, message })`. An empty
-workspace balance arrives as a generic `failed_precondition`, so it's matched by
-message and reported as `insufficient_credits`.
+The client maps SDK errors to `ConvexError({ code, message })`, by error class
+where the SDK has one. The SDK leaves `invalid_argument`, `unavailable` and
+`deadline_exceeded` as a generic `SandboxError`, so those are read from the
+`[code]` prefix of its message, and its readiness waits throw plain `Error`s
+that are matched by message (`terminated`, `timeout`). An empty workspace
+balance arrives as a generic `failed_precondition`, so it's matched by message
+and reported as `insufficient_credits`.

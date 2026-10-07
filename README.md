@@ -7,8 +7,8 @@ in a Convex table, so your UI updates live as a sandbox goes from `provisioning`
 to `ready` to `paused`.
 
 - **One sandbox per identity.** Sandboxes are keyed by `(ownerId, key)`.
-  `create` is safe to retry and to call concurrently: you never get, or pay for,
-  a second sandbox.
+  `create` is safe to retry and to call concurrently: every call ends up with
+  the same sandbox.
 - **Crash-safe.** A `create` that dies mid-flight leaves a tagged session that
   the next call adopts. `destroy` also cleans up any such orphans.
 - **Everything an agent needs:** shell commands, background processes, files,
@@ -112,20 +112,32 @@ Every method takes the action `ctx` and the sandbox's `{ ownerId, key }`.
 
 ### Lifecycle
 
-- `create({ options? })` returns the sandbox, creating it if needed. If a
-  concurrent call for the same identity fails, this one throws the same error.
-  `options` takes any `@tenkicloud/sandbox` create option: resources, image,
-  template, env, `allowDomains`, `maxDurationMs`, `snapshotId`, ...
+- `create({ options?, resume? })` returns the sandbox, creating it if needed. A
+  paused sandbox, including one Tenki paused at its deadline, is resumed first;
+  pass `resume: false` to get it as it is. If a concurrent call for the same
+  identity fails, this one throws the same error. `options` takes any
+  `@tenkicloud/sandbox` create option: resources, image, template, env,
+  `allowDomains`, `maxDurationMs`, `snapshotId`, ... With `snapshotId`, the size
+  comes from the snapshot and the `defaults` for image, template and resources
+  are skipped. Tags must be valid Tenki tags (`[a-z0-9][a-z0-9_:.-]*`), and the
+  `cvx:` prefix is reserved.
 - `pause({ wait? })` keeps memory and disk, so processes resume where they left
   off. It takes tens of seconds; with `wait: false` it returns `pausing` and a
   later `refresh` sees `paused`.
-- `resume()` returns once commands run again.
+- `resume()` returns once commands run again. It counts against
+  `maxActiveSandboxes`.
 - `extend({ additionalMs })` pushes the deadline out.
-- `snapshot({ name? })` captures the sandbox; `listSnapshots()` lists them.
+- `snapshot({ name?, expiresAt? })` captures the sandbox; `listSnapshots()`
+  lists them. A snapshot without `expiresAt` is kept until you delete it in
+  Tenki.
 - `fork({ ownerId, from, to })` snapshots `from` and creates `to` from it. The
-  two then run independently.
+  two then run independently. It throws `already_exists` while `to` is live or
+  being created, and checks `maxActiveSandboxes`, before taking the snapshot.
+  The fork's snapshot expires after an hour, and Tenki deletes it once no
+  sandbox uses it.
 - `refresh()` re-reads the sandbox from Tenki.
-- `destroy()` terminates it. The key can then be reused.
+- `destroy()` terminates it, and a `create` still in flight for it fails with
+  `terminated`. The key can then be reused.
 - `reconcile({ limit? })` refreshes the least recently updated live sandboxes
   across all owners. Run it from a cron so rows catch up with sandboxes that
   reached their deadline (see
@@ -133,18 +145,27 @@ Every method takes the action `ctx` and the sandbox's `{ ownerId, key }`.
 
 ### Commands and files
 
-- `exec({ command, cwd?, env?, timeoutMs? })` runs a command and waits. A string
-  runs under `bash -lc`; an array runs as argv. Output is capped at 1 MiB per
-  stream and the timeout at 9 minutes, inside Convex's action limit.
+- `exec({ command, cwd?, env?, timeoutMs?, maxOutputBytes? })` runs a command
+  and waits. A string runs under `bash -lc`; an array runs as argv, without
+  shell parsing (both need `bash`, `head` and `cat` in the image). Output is
+  capped inside the sandbox at `maxOutputBytes` per stream (1 MiB by default),
+  and the timeout at 9 minutes, inside Convex's action limit.
 - `spawn({ command, cwd?, env? })` starts a background command and returns a
   `processId` at once. It keeps running after the action ends and across
   pause/resume.
-- `processStatus({ processId, tailBytes? })` returns `running`, `exited` (with
-  `exitCode`), `killed`, or `lost` (ended without an exit, e.g. the sandbox
-  restarted), plus the tail of its output.
-- `kill({ processId, signal? })` signals the process and its children.
-- `readFile({ path, encoding? })` returns a string, or an `ArrayBuffer` with
-  `encoding: "bytes"`. `writeFile({ path, data })` takes either.
+- `processStatus({ processId, tailBytes? })` returns `running` (also while
+  children it started in the background run), `exited` (with `exitCode`),
+  `killed`, or `lost` (ended without an exit, e.g. the sandbox restarted), plus
+  the tail of its output.
+- `kill({ processId, signal? })` signals the process and its children with
+  `TERM` (the default), `KILL`, `INT` or `HUP`. `INT` and `HUP` need an `env`
+  with `--default-signal` in the image (GNU coreutils 8.31 or later); without it
+  they have no effect.
+- `readFile({ path, encoding?, maxBytes? })` returns a string, or an
+  `ArrayBuffer` with `encoding: "bytes"`. Files over `maxBytes` (16 MiB by
+  default, Convex's limit for a function's return value) throw `file_too_large`.
+  `writeFile({ path, data })` takes either; Convex caps action arguments at 5
+  MiB.
 - `exposePort({ port, ttlMs?, slug? })` returns a public URL and records it in
   the row's `previews`.
 
@@ -160,11 +181,17 @@ Errors are `ConvexError`s with a `code`:
 | Code                                                     | Meaning                                                                       |
 | -------------------------------------------------------- | ----------------------------------------------------------------------------- |
 | `not_found`                                              | No sandbox for this identity.                                                 |
+| `already_exists`                                         | `fork`'s target is live.                                                      |
 | `not_ready`                                              | The row's `phase` doesn't allow the call; `phase` is included.                |
 | `terminated`                                             | The sandbox is gone; the row is now `terminated`.                             |
 | `invalid_state`                                          | Tenki refused the call in the sandbox's current state; the row was re-synced. |
 | `insufficient_credits`                                   | The Tenki workspace's balance is empty.                                       |
 | `capacity_exceeded`                                      | `maxActiveSandboxes` is reached; try again later.                             |
+| `invalid_argument`                                       | Tenki rejected an option, e.g. a malformed tag.                               |
+| `snapshot_not_found`                                     | `snapshotId` doesn't exist.                                                   |
+| `file_too_large`                                         | `readFile` on a file over `maxBytes`; `size` is included.                     |
+| `spawn_failed`                                           | `spawn` couldn't start the command.                                           |
+| `unavailable`, `timeout`                                 | Tenki was briefly unavailable or a wait ran out; retry.                       |
 | `pause_failed`, `resume_failed`                          | Tenki couldn't pause or resume; the row was re-synced from Tenki.             |
 | `provisioning_timeout`                                   | A concurrent `create` of the same identity is still provisioning.             |
 | `file_not_found`                                         | `readFile` on a missing path.                                                 |
@@ -176,17 +203,22 @@ A failed `create` also records the error on the row (`phase: "error"` and
 
 ## Limiting spend
 
-`new Tenki(components.tenki, { maxActiveSandboxes: 20 })` refuses to start a
-sandbox once 20 are active (not paused) across all owners, counting creates in
-flight. The check runs in the same transaction that reserves the row, so
-concurrent creates and forks can't exceed it.
+`new Tenki(components.tenki, { maxActiveSandboxes: 20 })` refuses to start or
+resume a sandbox once 20 are active (not paused) across all owners, counting
+creates in flight. The check runs in the same transaction that reserves the row,
+so concurrent creates, forks and resumes can't exceed it.
 
 ## Lifetime
 
-A Tenki sandbox has an absolute lifetime, set with `maxDurationMs` at create
-time. Your workspace's limits set the default and the maximum. Activity does not
-extend it; call `extend`. When it ends, the row keeps its last known phase until
-`refresh` or `reconcile` runs.
+A Tenki sandbox runs for at most `maxDurationMs` at a time, set at create time;
+your workspace's limits set the default and the maximum. Activity does not
+extend it; call `extend`. At the deadline Tenki pauses the sandbox and keeps it
+for the pause retention (7 days unless you set `pauseRetentionMs`), then deletes
+it. The row keeps its last known phase until `refresh`, `reconcile` or the next
+`create` catches it up. `create` resumes a paused sandbox, and resuming one that
+reached its deadline starts a new lifetime of the same length, so
+`maxDurationMs` bounds each run, not the sandbox's total life. If sandboxes must
+not outlive a limit, enforce it yourself (see `example/convex/demo.ts`).
 
 ## Example and demo
 

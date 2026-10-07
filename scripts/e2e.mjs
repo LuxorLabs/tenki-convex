@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // End-to-end checks: the example app's e2e harness on a running Convex deployment,
-// against real Tenki. Needs TENKI_API_KEY and TENKI_E2E=1 set on the deployment and
-// TENKI_API_KEY in this shell for setup and cleanup. E2E_SLOW=1 adds the scenarios
-// that wait for a real deadline.
+// against real Tenki. Needs TENKI_API_KEY and TENKI_E2E=1 set on the deployment,
+// TENKI_API_KEY in this shell for setup and cleanup, and the deployment's admin key
+// (CONVEX_ADMIN_KEY, or read from a local backend's config) to call the internal
+// harness. E2E_SLOW=1 adds the scenarios that wait for a real deadline.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { ConvexClient, ConvexHttpClient } from "convex/browser";
@@ -29,14 +30,29 @@ const convexUrl =
 assert(convexUrl, "CONVEX_URL is not set");
 // Must match the deployment's CONVEX_CLOUD_URL, which seeds the adoption namespace.
 const namespace = process.env.E2E_NAMESPACE ?? convexUrl;
+
+function localAdminKey() {
+  try {
+    return JSON.parse(readFileSync(".convex/local/default/config.json", "utf8"))
+      .adminKey;
+  } catch {
+    return undefined;
+  }
+}
+const adminKey = process.env.CONVEX_ADMIN_KEY ?? localAdminKey();
+assert(adminKey, "CONVEX_ADMIN_KEY is not set and no local backend was found");
 const slow = process.env.E2E_SLOW === "1";
 
 const runId = Date.now().toString(36);
 const runTag = `cvx-e2e:${runId}`;
+const snapshotName = `cvx-e2e-${runId}`;
 const owner = (name) => `e2e-${runId}-${name}`;
 
 const http = new ConvexHttpClient(convexUrl);
 const live = new ConvexClient(convexUrl);
+// Internal functions need admin auth; neither client exposes it in its types.
+http.setAdminAuth(adminKey);
+live.setAdminAuth(adminKey);
 const sdk = new TenkiSandbox();
 const api = anyApi;
 
@@ -44,7 +60,8 @@ const act = (name, args) => http.action(api.e2e[name], args);
 const get = (ownerId, key) => http.query(api.e2eQueries.get, { ownerId, key });
 const create = (ownerId, key) =>
   act("create", { ownerId, key, tags: [runTag] });
-const exec = (who, command) => act("exec", { ...who, command });
+const exec = (who, command, options = {}) =>
+  act("exec", { ...who, command, ...options });
 const liveSessions = async (tag) =>
   (await sdk.list({ tags: [tag] })).filter(isLive);
 const codeIs = (code) => (err) => err?.data?.code === code;
@@ -103,7 +120,35 @@ try {
     const argv = await exec(alice, ["printf", "%s", "a b"]);
     assert.equal(argv.stdout, "a b");
     assert.equal((await exec(alice, "echo oops >&2")).stderr, "oops\n");
+    const big = await exec(alice, "head -c 200000000 /dev/zero; exit 5", {
+      maxOutputBytes: 1024,
+    });
+    assert.equal(big.exitCode, 5);
+    assert.equal(big.stdout.length, 1024);
+    assert.equal(big.stdoutTruncated, true);
   });
+
+  await scenario(
+    "a timed-out exec ends its command and keeps its output",
+    async () => {
+      const started = Date.now();
+      const r = await exec(
+        alice,
+        "echo hi; exec -a e2e-timeout-probe sleep 60",
+        {
+          timeoutMs: 3000,
+        },
+      );
+      assert.equal(r.timedOut, true);
+      assert.equal(r.stdout, "hi\n");
+      assert.ok(
+        Date.now() - started < 15_000,
+        `took ${Date.now() - started}ms`,
+      );
+      const left = await exec(alice, "pgrep -f '[e]2e-timeout-probe' || true");
+      assert.equal(left.stdout, "");
+    },
+  );
 
   await scenario(
     "concurrent creates for one identity make one sandbox",
@@ -276,12 +321,14 @@ try {
   await scenario(
     "fork copies the sandbox into an independent one",
     async () => {
-      const forked = await act("fork", {
+      const forkArgs = {
         ownerId: alice.ownerId,
         from: "main",
         to: "fork",
+        name: snapshotName,
         tags: [runTag],
-      });
+      };
+      const forked = await act("fork", forkArgs);
       assert.equal(forked.phase, "ready");
       assert.notEqual(
         forked.sessionId,
@@ -301,6 +348,7 @@ try {
         await act("readText", { ...alice, path: "/home/tenki/hello.txt" }),
         "héllo\n",
       );
+      await assert.rejects(act("fork", forkArgs), codeIs("already_exists"));
       await act("destroy", fork);
     },
   );
@@ -336,15 +384,24 @@ try {
           },
           5 * 60_000,
         );
-        assert.equal(
-          (await get(gina.ownerId, gina.key)).phase,
-          "ready",
-          "row should be stale before reconcile",
+        // Nothing here syncs the row, but the app's reconcile cron may already
+        // have caught it up while the deadline passed.
+        const before = (await get(gina.ownerId, gina.key)).phase;
+        assert.ok(
+          ["ready", "pausing", "paused", "terminated"].includes(before),
+          before,
         );
         await act("reconcile", {});
         const after = await get(gina.ownerId, gina.key);
         assert.ok(["paused", "terminated"].includes(after.phase), after.phase);
         await assert.rejects(exec(gina, "true"), codeIs("not_ready"));
+        const again = await act("createShortLived", {
+          ...gina,
+          maxDurationMs: 60_000,
+          tags: [runTag],
+        });
+        assert.equal(again.phase, "ready");
+        assert.equal((await exec(gina, "true")).exitCode, 0);
         await act("destroy", gina);
       },
     );
@@ -378,10 +435,24 @@ try {
       .close()
       .catch((err) => console.log(`  cleanup failed for ${s.id}: ${err}`));
   const remaining = await liveSessions(runTag);
+  // A snapshot can't be deleted while a sandbox restored from it is terminating.
+  let snapshots = [];
+  for (let i = 0; i < 10; i++) {
+    snapshots = (await sdk.listSnapshots()).filter(
+      (s) => s.name === snapshotName && s.state !== "DELETING",
+    );
+    for (const s of snapshots) await sdk.deleteSnapshot(s.id).catch(() => {});
+    snapshots = (await sdk.listSnapshots()).filter(
+      (s) => s.name === snapshotName && s.state !== "DELETING",
+    );
+    if (!snapshots.length) break;
+    await sleep(3_000);
+  }
   console.log(
-    `cleanup: terminated ${leftovers.length}, remaining ${remaining.length}`,
+    `cleanup: terminated ${leftovers.length}, remaining ${remaining.length}, undeleted snapshots ${snapshots.length}`,
   );
-  if (remaining.length) results.push({ name: "cleanup", ok: false });
+  if (remaining.length || snapshots.length)
+    results.push({ name: "cleanup", ok: false });
 }
 
 const failed = results.filter((r) => !r.ok);
