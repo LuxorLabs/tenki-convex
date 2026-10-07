@@ -1,9 +1,8 @@
 # Releasing
 
 The repository is public and 0.1.0 is on npm (steps 1 to 4 under Going public
-are done). A release reaches npm only after someone pushes a `v*` tag, a
-reviewer approves the release run, and a maintainer of `@tenkicloud/convex`
-approves the staged version on npm.
+are done). A release reaches npm only after someone pushes a `v*` tag and a
+maintainer of `@tenkicloud/convex` approves the staged version on npm with 2FA.
 
 ## Before going public
 
@@ -23,11 +22,12 @@ approves the staged version on npm.
 3. Set up the `npm-publish` environment and protect release tags. npm's trusted
    publisher matches the repository, workflow file and environment but not the
    ref, so these settings are what tie publishing to release tags:
-   - **Settings → Environments → `npm-publish`:** add required reviewers and
-     turn on **Prevent self-review**, so whoever pushes a tag can't approve its
-     publish. Under **Deployment branches and tags**, choose **Selected branches
-     and tags** with one tag rule, `v*`, so a branch that edits the workflow
-     can't use the environment.
+   - **Settings → Environments → `npm-publish`:** under **Deployment branches
+     and tags**, choose **Selected branches and tags** with one tag rule, `v*`,
+     so a branch that edits the workflow can't use the environment. It needs no
+     required reviewers: the trusted publisher only allows `npm stage publish`,
+     and a maintainer approves each staged version on npm with 2FA. If the
+     trusted publisher ever allows `npm publish` again, add reviewers back.
    - **Settings → Rules → Rulesets:** add a tag ruleset for `v*` with **Restrict
      creations**, **Restrict updates** and **Restrict deletions**, and only
      release maintainers on the bypass list.
@@ -61,8 +61,7 @@ approves the staged version on npm.
 
 ## Later releases
 
-Bump the version, tag it, push, approve the run, then approve the staged version
-on npm:
+Bump the version, tag it, push, then approve the staged version on npm:
 
 ```sh
 npm version 0.1.1 --no-git-tag-version
@@ -75,10 +74,9 @@ The tag must be annotated: `--follow-tags` doesn't push lightweight tags. The
 workflow refuses a tag that doesn't match `package.json`, a tag that isn't on
 `main`, and a version that is already on npm.
 
-After a reviewer on the `npm-publish` environment approves the run, the publish
-job stages the version with `npm stage publish`. Nothing is live until a
-maintainer of `@tenkicloud/convex` approves it with 2FA. The run summary shows
-the stage id:
+The publish job stages the version with `npm stage publish`. Nothing is live
+until a maintainer of `@tenkicloud/convex` approves it with 2FA. The run summary
+shows the stage id:
 
 ```sh
 npm stage approve <stage-id>   # or Staged Packages on npmjs.com

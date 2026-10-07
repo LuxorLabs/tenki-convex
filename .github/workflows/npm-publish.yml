@@ -153,8 +153,8 @@ jobs:
     # GitHub-hosted on purpose: npm supports neither provenance nor trusted
     # publishing from self-hosted runners.
     runs-on: ubuntu-latest
-    # Each publish waits for an approval from the environment's required
-    # reviewers. The npm trusted-publisher config must name this environment.
+    # The trusted publisher names this environment, and the environment only
+    # accepts v* tags. The human approval is the 2FA approve on npm.
     environment: npm-publish
     timeout-minutes: 15
     permissions:
