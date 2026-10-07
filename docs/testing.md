@@ -79,7 +79,8 @@ building never see it.
 Pull requests from forks skip the suite, since GitHub doesn't give them
 repository secrets. Don't switch the trigger to `pull_request_target` to get
 around that: it would run the fork's code with the key. To test a fork's change,
-push it to a branch in this repository.
+push it to a branch in this repository and open a pull request from it, or run
+**E2E** on that branch from the Actions tab.
 
 Concurrency is grouped by event and ref, so a new push to a PR cancels that PR's
 older run, while runs for different refs go ahead in parallel. The Test
