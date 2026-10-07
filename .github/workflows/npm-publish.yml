@@ -1,12 +1,12 @@
 name: Release
 
 # Publishes @tenkicloud/convex to npm. Only a pushed v* tag publishes, and the tag
-# must match package.json's version and point at a commit on main.
+# must match package.json's version and point at a commit on main. Bump the
+# version in a PR (npm version 0.1.2 --no-git-tag-version), then tag the merge:
 #
-#   npm version 0.1.1 --no-git-tag-version
-#   git commit -am "@tenkicloud/convex 0.1.1"
-#   git tag -a v0.1.1 -m "@tenkicloud/convex 0.1.1"
-#   git push origin main --follow-tags   # pushes annotated tags only
+#   git fetch origin main
+#   git tag -a v0.1.2 -m "@tenkicloud/convex 0.1.2" origin/main
+#   git push origin v0.1.2
 #
 # The publish job stages the version through npm trusted publishing (GitHub OIDC,
 # no token). It goes live only when a maintainer of @tenkicloud/convex approves it
