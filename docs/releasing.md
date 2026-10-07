@@ -26,11 +26,11 @@ can be published by accident. The steps below take it public.
    version uses a token:
    - Create an npm granular access token that can publish to `@tenkicloud` and
      save it as the repository secret `NPM_TOKEN`.
-   - Run **Release** from the Actions tab with `dry_run` checked to see every
-     gate pass, then tag and push:
+   - Run **Release** from the Actions tab to see every gate pass; a manual run
+     is always a dry run. Then tag and push:
 
      ```sh
-     git tag v0.1.0 && git push origin v0.1.0
+     git tag -a v0.1.0 -m "@tenkicloud/convex 0.1.0" && git push origin v0.1.0
      ```
 
    - Approve the run.
@@ -58,12 +58,14 @@ Bump the version, tag it, push, and approve the run:
 
 ```sh
 npm version 0.1.1 --no-git-tag-version
-git commit -am "@tenkicloud/convex 0.1.1" && git tag v0.1.1
+git commit -am "@tenkicloud/convex 0.1.1"
+git tag -a v0.1.1 -m "@tenkicloud/convex 0.1.1"
 git push origin main --follow-tags
 ```
 
-The workflow refuses a tag that doesn't match `package.json` or a version that
-is already on npm.
+The tag must be annotated: `--follow-tags` doesn't push lightweight tags. The
+workflow refuses a tag that doesn't match `package.json` or a version that is
+already on npm.
 
 ## Submitting to the Components Directory
 
