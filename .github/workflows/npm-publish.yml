@@ -1,24 +1,21 @@
 name: Release
 
 # Publishes @tenkicloud/convex to npm. Only a pushed v* tag publishes, and the tag
-# must match package.json's version and point at a commit on main: npm publish is
-# irreversible, so the workflow refuses to publish otherwise.
+# must match package.json's version and point at a commit on main.
 #
 #   npm version 0.1.1 --no-git-tag-version
 #   git commit -am "@tenkicloud/convex 0.1.1"
 #   git tag -a v0.1.1 -m "@tenkicloud/convex 0.1.1"
 #   git push origin main --follow-tags   # pushes annotated tags only
 #
-# Publishing is keyless (npm trusted publishing via GitHub OIDC): the trusted
-# publisher for @tenkicloud/convex on npmjs.com points at this exact workflow
-# file (npm-publish.yml) and the npm-publish environment, the same convention as
-# tenki-mcp and tenki-composio-tools. A trusted publisher can't be set up for a
-# package that doesn't exist yet, so the NPM_TOKEN environment secret is a
-# bootstrap for the first version only: while it is set the workflow uses it,
-# and once it is deleted the keyless path takes over with no workflow change.
+# The publish job stages the version through npm trusted publishing (GitHub OIDC,
+# no token). It goes live only when a maintainer of @tenkicloud/convex approves it
+# with 2FA: `npm stage approve <stage-id>`, or Staged Packages on npmjs.com. The
+# trusted publisher on npmjs.com names this workflow file (npm-publish.yml) and
+# the npm-publish environment, and only needs to allow `npm stage publish`.
 #
 # The build job runs every gate and packs the tarball without id-token, since it
-# runs dependency code. The publish job installs nothing and publishes that
+# runs dependency code. The publish job installs nothing and stages that
 # tarball. Running the workflow from the Actions tab is always a dry run: only
 # the build job runs.
 
@@ -156,8 +153,8 @@ jobs:
     # GitHub-hosted on purpose: npm supports neither provenance nor trusted
     # publishing from self-hosted runners.
     runs-on: ubuntu-latest
-    # Each publish waits for an approval from the environment's required
-    # reviewers. The npm trusted-publisher config must name this environment.
+    # The trusted publisher names this environment, and the environment only
+    # accepts v* tags. The human approval is the 2FA approve on npm.
     environment: npm-publish
     timeout-minutes: 15
     permissions:
@@ -188,62 +185,40 @@ jobs:
       - name: Verify the tarball is the one the build packed
         run: echo "${SHA256}  ${TARBALL}" | sha256sum -c -
 
-      # The secrets context isn't allowed in a step's if:, so this step turns the
-      # secret's presence into an output. The token itself only reaches the
-      # bootstrap publish step.
-      - name: Pick the publish path
-        id: auth
-        env:
-          HAS_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
-        run: echo "bootstrap=${HAS_TOKEN}" >> "$GITHUB_OUTPUT"
-
-      # ── Irreversible from here ────────────────────────────────────────────────
-
-      - name: Publish to npm (bootstrap, NPM_TOKEN present)
-        id: bootstrap
-        if: steps.auth.outputs.bootstrap == 'true'
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run:
-          npm publish "./${TARBALL}" "$PROVENANCE" --access public
-          --ignore-scripts
-
-      - name: Publish to npm (trusted publishing, keyless)
-        id: keyless
-        if: steps.auth.outputs.bootstrap == 'false'
+      # Nothing goes live from here: npm keeps the version staged until a
+      # maintainer approves it with 2FA, and a stage can be rejected instead.
+      - name: Stage on npm (trusted publishing)
+        id: stage
         run: |
           set -euo pipefail
-          # Trusted publishing needs npm >= 11.5.1. Node 24 bundles npm 11, so this
+          # Staged publishing needs npm >= 11.15.0. Node 24 bundles npm 11, so this
           # normally passes; it fails loudly rather than falling back silently.
           # shellcheck disable=SC2016 # the single-quoted script is JavaScript
-          node -e 'const p=s=>s.split(/[.-]/).slice(0,3).map(Number),[x,y]=[p(process.argv[1]),p("11.5.1")];
+          node -e 'const p=s=>s.split(/[.-]/).slice(0,3).map(Number),[x,y]=[p(process.argv[1]),p("11.15.0")];
             for(let i=0;i<3;i++){if(x[i]>y[i])process.exit(0);if(x[i]<y[i]){
-              console.error(`::error::npm ${process.argv[1]} < 11.5.1; trusted publishing unavailable`);process.exit(1);}}' "$(npm --version)"
-          npm publish "./${TARBALL}" "$PROVENANCE" --access public --ignore-scripts
+              console.error(`::error::npm ${process.argv[1]} < 11.15.0; staged publishing unavailable`);process.exit(1);}}' "$(npm --version)"
+          npm stage publish "./${TARBALL}" "$PROVENANCE" --access public --ignore-scripts | tee "$RUNNER_TEMP/stage.out"
+          echo "stage_id=$(sed -n 's/.*(staged with id \([0-9a-f-]*\)).*/\1/p' "$RUNNER_TEMP/stage.out")" >> "$GITHUB_OUTPUT"
 
-      - name: Wait for npm to serve the new version
-        run: |
-          set -euo pipefail
-          for i in $(seq 1 30); do
-            code=$(curl -sS -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/${PKG}/${VERSION}" || echo 000)
-            if [ "$code" = "200" ]; then echo "npm is serving ${PKG}@${VERSION}"; exit 0; fi
-            echo "attempt ${i}/30: HTTP ${code}"; sleep 10
-          done
-          echo "::error::npm did not serve ${PKG}@${VERSION} within 5 minutes"
-          exit 1
-
-      - name: Publish summary
+      - name: Release summary
         if: always()
+        env:
+          STAGE_ID: ${{ steps.stage.outputs.stage_id }}
         run: |
           {
-            echo "### @tenkicloud/convex release"
+            echo "### @tenkicloud/convex ${VERSION}"
             echo ""
-            echo "- version: \`${VERSION}\`"
-            echo "- published: ${{ (steps.bootstrap.outcome == 'success' || steps.keyless.outcome == 'success') && 'yes' || 'no' }}"
-            echo "- npm: https://www.npmjs.com/package/${PKG}/v/${VERSION}"
+            echo "- staged: ${{ steps.stage.outcome == 'success' && 'yes' || 'no' }}"
             echo "- provenance: \`${PROVENANCE}\`"
-            echo ""
-            echo "Trusted publisher config on npmjs.com: org LuxorLabs, repo tenki-convex,"
-            echo "workflow npm-publish.yml, environment npm-publish. If NPM_TOKEN is still"
-            echo "set as a secret, delete it and revoke the token; keyless OIDC takes over."
+            if [ -n "${STAGE_ID}" ]; then
+              echo ""
+              echo "Not live yet. A maintainer of ${PKG} approves it with 2FA:"
+              echo ""
+              echo "    npm stage approve ${STAGE_ID}"
+              echo ""
+              echo "or under Staged Packages on npmjs.com. Reject it with \`npm stage reject ${STAGE_ID}\`."
+            elif [ "${{ steps.stage.outcome }}" = "success" ]; then
+              echo ""
+              echo "Not live yet. Find the stage id with \`npm stage list ${PKG}\` and approve it with 2FA."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
