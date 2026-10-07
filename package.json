@@ -75,7 +75,6 @@
     "@convex-dev/auth": "0.0.96",
     "@convex-dev/eslint-plugin": "5.0.0",
     "@edge-runtime/vm": "5.0.0",
-    "@eslint/eslintrc": "3.3.7",
     "@eslint/js": "10.0.1",
     "@types/node": "24.19.0",
     "@types/react": "19.3.0",
