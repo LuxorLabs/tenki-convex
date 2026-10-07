@@ -70,6 +70,13 @@
   "peerDependencies": {
     "convex": "^1.43.0"
   },
+  "devEngines": {
+    "packageManager": {
+      "name": "npm",
+      "version": "^11.18.0",
+      "onFail": "error"
+    }
+  },
   "devDependencies": {
     "@auth/core": "0.41.3",
     "@convex-dev/auth": "0.0.96",
