@@ -50,7 +50,7 @@ jobs:
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: "24.x"
+          node-version-file: .nvmrc
           cache-dependency-path: package.json
           cache: "npm"
 
@@ -171,6 +171,8 @@ jobs:
       SHA256: ${{ needs.build.outputs.sha256 }}
 
     steps:
+      # This job doesn't check out the repo, so it can't read .nvmrc; keep this
+      # on the same major.
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: "24.x"

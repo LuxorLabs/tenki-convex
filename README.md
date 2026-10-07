@@ -231,3 +231,8 @@ to run it.
 
 [docs/architecture.md](docs/architecture.md) explains how the component works,
 and [docs/testing.md](docs/testing.md) covers the test suites.
+
+Development needs Node 24 with npm 11.18 or later, but not npm 12. Node 24.20
+and later bundle a matching npm, and `nvm install` installs Node 24 from
+`.nvmrc`. With any other npm, `devEngines` in `package.json` makes
+`npm install`, `npm ci` and `npm run` stop with an error.

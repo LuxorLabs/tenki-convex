@@ -10,9 +10,6 @@
   "labels": ["dependencies", "renovate"],
   "configMigration": true,
   "rebaseWhen": "conflicted",
-  "constraints": {
-    "npm": ">=11.10.0"
-  },
   "lockFileMaintenance": {
     "description": [
       "No Renovate age gate here: Renovate can't date a lock file refresh, so a gate would hold it forever. npm enforces the cooldown instead, through min-release-age in .npmrc, and it is the only side that sees the transitive versions a refresh picks.",
@@ -48,7 +45,7 @@
       "enabled": false
     },
     {
-      "description": "The workflows run Node 24 (setup-node 24.x), so its types stay on 24; move this with them.",
+      "description": ".nvmrc sets Node 24 for development, Renovate and CI, so its types stay on 24; move this with it.",
       "matchPackageNames": ["@types/node"],
       "allowedVersions": "<25.0.0"
     },
