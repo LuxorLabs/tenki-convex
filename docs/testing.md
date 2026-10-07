@@ -73,7 +73,13 @@ on it and pass `CONVEX_URL=https://<deployment>.convex.cloud` and its
 
 `e2e.yml` starts an anonymous local Convex backend, sets `TENKI_API_KEY` from
 the repository secret and `TENKI_E2E=1`, and runs the suite. The nightly run
-adds the slow checks.
+adds the slow checks. Only the steps that call Tenki get the key; installing and
+building never see it.
+
+Pull requests from forks skip the suite, since GitHub doesn't give them
+repository secrets. Don't switch the trigger to `pull_request_target` to get
+around that: it would run the fork's code with the key. To test a fork's change,
+push it to a branch in this repository.
 
 Concurrency is grouped by event and ref, so a new push to a PR cancels that PR's
 older run, while runs for different refs go ahead in parallel. The Test

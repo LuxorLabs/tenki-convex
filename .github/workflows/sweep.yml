@@ -12,8 +12,6 @@ jobs:
     name: Terminate leftover e2e sandboxes
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    env:
-      TENKI_API_KEY: ${{ secrets.TENKI_API_KEY }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -29,5 +27,8 @@ jobs:
           npm ci
           npm run build
 
+      # Only this step gets the key, so install scripts and the build never see it.
       - name: Sweep
+        env:
+          TENKI_API_KEY: ${{ secrets.TENKI_API_KEY }}
         run: node scripts/sweep.mjs
