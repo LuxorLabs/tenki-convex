@@ -1,7 +1,8 @@
 # Releasing
 
-The repository is private and `package.json` has `"private": true`, so nothing
-can be published by accident. The steps below take it public.
+The repository is public and `package.json` no longer has `"private": true`
+(steps 1 and 2 under Going public are done). Nothing reaches npm until someone
+pushes a `v*` tag and a reviewer approves the release run.
 
 ## Before going public
 

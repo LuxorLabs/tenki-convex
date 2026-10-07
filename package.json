@@ -1,7 +1,10 @@
 {
   "name": "@tenkicloud/convex",
   "description": "Tenki Sandboxes for Convex: cloud sandboxes for AI agents, with live state in your Convex tables.",
-  "repository": "github:LuxorLabs/tenki-convex",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LuxorLabs/tenki-convex.git"
+  },
   "homepage": "https://github.com/LuxorLabs/tenki-convex#readme",
   "bugs": {
     "url": "https://github.com/LuxorLabs/tenki-convex/issues"
@@ -95,7 +98,6 @@
   },
   "types": "./dist/client/index.d.ts",
   "module": "./dist/client/index.js",
-  "private": true,
   "dependencies": {
     "@tenkicloud/sandbox": "^1.4.1"
   }
