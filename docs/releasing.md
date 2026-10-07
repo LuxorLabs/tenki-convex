@@ -1,8 +1,7 @@
 # Releasing
 
 The repository is private and `package.json` has `"private": true`, so nothing
-can be published by accident. The steps below take it public. None of them have
-been done yet.
+can be published by accident. The steps below take it public.
 
 ## Before going public
 
@@ -15,19 +14,32 @@ been done yet.
 
 ## Going public
 
-1. Make `LuxorLabs/tenki-convex` public.
-2. Remove `"private": true` from `package.json`.
-3. Publish to npm under the `@tenkicloud` scope (same scope as
-   `@tenkicloud/sandbox`):
+1. Make `LuxorLabs/tenki-convex` public. Publishing works from a private repo,
+   but npm only attaches provenance to packages built from public ones.
+2. Remove `"private": true` from `package.json`. The release workflow refuses to
+   publish while it is set.
+3. Publish the first version. `.github/workflows/npm-publish.yml` publishes when
+   a `v*` tag matching `package.json`'s version is pushed, after build, tests,
+   typecheck, lint, the pack check and a production dependency audit, and after
+   one of the `npm-publish` environment's reviewers approves the run. A trusted
+   publisher can't be set up for a package that doesn't exist yet, so the first
+   version uses a token:
+   - Create an npm granular access token that can publish to `@tenkicloud` and
+     save it as the repository secret `NPM_TOKEN`.
+   - Run **Release** from the Actions tab with `dry_run` checked to see every
+     gate pass, then tag and push:
 
-   ```sh
-   npm ci && npm run build:clean && npm test && npm run lint && npm run typecheck && npm run pack:check
-   npm version 0.1.0 --no-git-tag-version   # or the version you want
-   npm publish --access public
-   git tag v0.1.0 && git push --follow-tags
-   ```
+     ```sh
+     git tag v0.1.0 && git push origin v0.1.0
+     ```
 
-4. Run Convex's
+   - Approve the run.
+4. On npmjs.com, add a trusted publisher to `@tenkicloud/convex`: GitHub
+   Actions, organization `LuxorLabs`, repository `tenki-convex`, workflow
+   `npm-publish.yml`, environment `npm-publish`. Then delete the `NPM_TOKEN`
+   secret and revoke the token; later releases publish without one.
+
+5. Run Convex's
    [preflight check](https://www.convex.dev/components/submit/check) on the
    public repo URL. It needs a URL it can fetch, so it can't run while the repo
    is private. It checks:
@@ -38,7 +50,20 @@ been done yet.
 
    Every component function already has both validators.
 
-5. Deploy the demo (see [demo.md](demo.md)) so the listing can link to it.
+6. Deploy the demo (see [demo.md](demo.md)) so the listing can link to it.
+
+## Later releases
+
+Bump the version, tag it, push, and approve the run:
+
+```sh
+npm version 0.1.1 --no-git-tag-version
+git commit -am "@tenkicloud/convex 0.1.1" && git tag v0.1.1
+git push origin main --follow-tags
+```
+
+The workflow refuses a tag that doesn't match `package.json` or a version that
+is already on npm.
 
 ## Submitting to the Components Directory
 

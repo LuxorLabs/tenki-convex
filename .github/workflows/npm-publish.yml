@@ -1,0 +1,185 @@
+name: Release
+
+# Publishes @tenkicloud/convex to npm. Triggered by pushing a v* tag, which must
+# match package.json's version: npm publish is irreversible, so the workflow
+# refuses to publish if they disagree.
+#
+#   npm version 0.1.1 --no-git-tag-version
+#   git commit -am "@tenkicloud/convex 0.1.1" && git tag v0.1.1
+#   git push origin main --follow-tags
+#
+# Publishing is keyless (npm trusted publishing via GitHub OIDC): the trusted
+# publisher for @tenkicloud/convex on npmjs.com points at this exact workflow
+# file (npm-publish.yml) and the npm-publish environment, the same convention as
+# tenki-mcp and tenki-composio-tools. A trusted publisher can't be set up for a
+# package that doesn't exist yet, so the NPM_TOKEN secret is a bootstrap for the
+# first version only: while it is set the workflow uses it, and once it is
+# deleted the keyless path takes over with no workflow change.
+#
+# Use the workflow_dispatch entry with dry_run (the default) to run every gate
+# without publishing anything.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run every gate but skip the publish"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # GitHub-hosted on purpose: npm supports neither provenance nor trusted
+    # publishing from self-hosted runners.
+    runs-on: ubuntu-latest
+    # Each publish waits for an approval from the environment's required
+    # reviewers. The npm trusted-publisher config must name this environment.
+    environment: npm-publish
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write # trusted publishing and provenance
+    env:
+      # Mapped here because the `secrets` context isn't available in step-level
+      # `if:` conditions, while `env` is. Empty when the secret is absent, which is
+      # how the workflow picks between the bootstrap and keyless paths.
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # npm doesn't support provenance from private repositories.
+      PROVENANCE:
+        ${{ github.event.repository.private && '--no-provenance' ||
+        '--provenance' }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "24.x"
+          registry-url: "https://registry.npmjs.org"
+          cache-dependency-path: package.json
+          cache: "npm"
+
+      - run: npm ci
+
+      # Everything below this line runs before anything irreversible happens.
+
+      - name: Verify the tag matches package.json
+        id: ver
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG=$(node -p "require('./package.json').version")
+          else
+            TAG="${GITHUB_REF_NAME#v}"
+          fi
+          node - "$TAG" "${{ github.event_name == 'push' || !inputs.dry_run }}" <<'JS'
+          const [tag, publishing] = process.argv.slice(2);
+          const pkg = require("./package.json");
+          if (pkg.version !== tag) {
+            console.error(`::error::package.json version ${pkg.version} != tag ${tag}`);
+            process.exitCode = 1;
+          }
+          if (pkg.private) {
+            // npm refuses to publish a private package; say why before trying.
+            const level = publishing === "true" ? "error" : "warning";
+            console.error(`::${level}::package.json has "private": true; remove it to publish`);
+            if (level === "error") process.exitCode = 1;
+          }
+          JS
+          echo "version=$TAG" >> "$GITHUB_OUTPUT"
+          echo "npm_name=$(node -p 'require("./package.json").name')" >> "$GITHUB_OUTPUT"
+
+      - name: Refuse a version that is already on npm
+        env:
+          PKG: ${{ steps.ver.outputs.npm_name }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          code=$(curl -sS -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/${PKG}/${VERSION}")
+          if [ "$code" = "200" ]; then
+            echo "::error::${PKG}@${VERSION} is already published; bump the version"
+            exit 1
+          fi
+
+      - run: npm run build
+
+      - name: Test, typecheck and lint
+        run: |
+          npm test
+          npm run typecheck
+          npm run lint
+
+      - name: Check the packed package
+        run: npm run pack:check
+
+      - name: Dependency audit (production deps)
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Show the tarball that will be published
+        run: npm pack --dry-run
+
+      # ── Irreversible from here ────────────────────────────────────────────────
+
+      - name: Publish to npm (bootstrap, NPM_TOKEN present)
+        if:
+          (github.event_name == 'push' || !inputs.dry_run) && env.NPM_TOKEN !=
+          ''
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish "$PROVENANCE" --access public
+
+      - name: Publish to npm (trusted publishing, keyless)
+        if:
+          (github.event_name == 'push' || !inputs.dry_run) && env.NPM_TOKEN ==
+          ''
+        run: |
+          set -euo pipefail
+          # Trusted publishing needs npm >= 11.5.1. Node 24 bundles npm 11, so this
+          # normally passes; it fails loudly rather than falling back silently.
+          # shellcheck disable=SC2016 # the single-quoted script is JavaScript
+          node -e 'const p=s=>s.split(/[.-]/).slice(0,3).map(Number),[x,y]=[p(process.argv[1]),p("11.5.1")];
+            for(let i=0;i<3;i++){if(x[i]>y[i])process.exit(0);if(x[i]<y[i]){
+              console.error(`::error::npm ${process.argv[1]} < 11.5.1; trusted publishing unavailable`);process.exit(1);}}' "$(npm --version)"
+          npm publish "$PROVENANCE" --access public
+
+      - name: Wait for npm to serve the new version
+        if: github.event_name == 'push' || !inputs.dry_run
+        env:
+          PKG: ${{ steps.ver.outputs.npm_name }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            code=$(curl -sS -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/${PKG}/${VERSION}" || echo 000)
+            if [ "$code" = "200" ]; then echo "npm is serving ${PKG}@${VERSION}"; exit 0; fi
+            echo "attempt ${i}/30: HTTP ${code}"; sleep 10
+          done
+          echo "::error::npm did not serve ${PKG}@${VERSION} within 5 minutes"
+          exit 1
+
+      - name: Publish summary
+        if: always()
+        env:
+          PKG: ${{ steps.ver.outputs.npm_name }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          {
+            echo "### @tenkicloud/convex release"
+            echo ""
+            echo "- version: \`${VERSION}\`"
+            echo "- npm: https://www.npmjs.com/package/${PKG}/v/${VERSION}"
+            echo "- provenance: \`${PROVENANCE}\`"
+            echo ""
+            echo "Trusted publisher config on npmjs.com: org LuxorLabs, repo tenki-convex,"
+            echo "workflow npm-publish.yml, environment npm-publish. If NPM_TOKEN is still"
+            echo "set as a secret, delete it and revoke the token; keyless OIDC takes over."
+          } >> "$GITHUB_STEP_SUMMARY"
