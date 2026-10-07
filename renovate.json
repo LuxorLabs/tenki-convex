@@ -1,28 +1,96 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:best-practices"],
+  "extends": [
+    "config:recommended",
+    ":pinDevDependencies",
+    "abandonments:recommended"
+  ],
   "timezone": "America/Los_Angeles",
+  "schedule": ["every weekend"],
+  "labels": ["dependencies", "renovate"],
+  "configMigration": true,
+  "rebaseWhen": "conflicted",
+  "constraints": {
+    "npm": ">=11.10.0"
+  },
+  "lockFileMaintenance": {
+    "description": [
+      "No Renovate age gate here: Renovate can't date a lock file refresh, so a gate would hold it forever. npm enforces the cooldown instead, through min-release-age in .npmrc, and it is the only side that sees the transitive versions a refresh picks.",
+      "A refresh is only true of the tree it resolved against, so every merge to main leaves this branch describing a package.json that has moved. Rebasing on the base branch regenerates it, which keeps its green check a statement about the merge someone is actually about to make."
+    ],
+    "enabled": true,
+    "schedule": ["every weekend"],
+    "minimumReleaseAge": null,
+    "rebaseWhen": "behind-base-branch"
+  },
+  "prConcurrentLimit": 5,
+  "minimumReleaseAge": "14 days",
+  "minimumReleaseAgeBuffer": "1 day",
+  "internalChecksFilter": "strict",
+  "osvVulnerabilityAlerts": true,
+  "vulnerabilityAlerts": {
+    "labels": ["security"]
+  },
   "packageRules": [
     {
-      "groupName": "Routine updates",
-      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
-      "prConcurrentLimit": 1,
-      "automerge": true
-    },
-    {
-      "groupName": "Major updates",
+      "description": "A major needs a proper read of its changelog, which rarely happens the week it lands. Park it on the dashboard so it stops holding a concurrency slot, and tick it there when someone is ready to do that work.",
       "matchUpdateTypes": ["major"],
-      "automerge": false
+      "dependencyDashboardApproval": true
     },
     {
+      "description": "A lock file refresh carries no update anyone is waiting on, so it is created last and takes one of the concurrency slots above only when a real update does not need it.",
+      "matchUpdateTypes": ["lockFileMaintenance"],
+      "prPriority": -1
+    },
+    {
+      "description": "Manage GitHub Actions SHA pins by hand. A digest-bump PR is a branch in this repo, so CI, E2E with TENKI_API_KEY included, would run the new action code before anyone reviews it.",
+      "matchManagers": ["github-actions"],
+      "enabled": false
+    },
+    {
+      "description": "The workflows run Node 24 (setup-node 24.x), so its types stay on 24; move this with them.",
+      "matchPackageNames": ["@types/node"],
+      "allowedVersions": "<25.0.0"
+    },
+    {
+      "description": "Batch non-major devDependency updates into one PR.",
       "matchDepTypes": ["devDependencies"],
-      "automerge": true
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "devDependencies (non-major)"
     },
     {
-      "description": "Each Tenki SDK release gets its own PR; the e2e suite must pass and a human merges it.",
+      "groupName": "react",
+      "matchPackageNames": [
+        "react",
+        "react-dom",
+        "@types/react",
+        "@types/react-dom"
+      ]
+    },
+    {
+      "description": "vite and its plugins move together; @vitejs/plugin-react 6 requires vite ^8.",
+      "groupName": "vite",
+      "matchPackageNames": ["vite", "@vitejs/**"]
+    },
+    {
+      "description": "eslint and @eslint/* release in lockstep, and typescript-eslint has to support the eslint it runs under.",
+      "groupName": "eslint",
+      "matchPackageNames": ["eslint", "@eslint/**", "typescript-eslint"]
+    },
+    {
+      "description": "convex-test declares convex as a peer, so the two move together.",
+      "groupName": "convex",
+      "matchPackageNames": ["convex", "convex-test"]
+    },
+    {
+      "description": "@convex-dev/auth declares @auth/core as a peer, and on 0.x any release can break, so the two move together and outside the batch.",
+      "groupName": "convex auth",
+      "matchPackageNames": ["@convex-dev/auth", "@auth/core"]
+    },
+    {
+      "description": "Each Tenki SDK release gets its own PR; the e2e suite runs against it and a human merges it.",
       "matchPackageNames": ["@tenkicloud/sandbox"],
-      "automerge": false,
-      "labels": ["tenki-sdk"]
+      "addLabels": ["tenki-sdk"]
     }
   ]
 }
