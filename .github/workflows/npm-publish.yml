@@ -28,7 +28,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  # Repo-wide, not per-ref: serialize all releases so two tag pushes can't
+  # stage/publish concurrently.
+  group: release
   cancel-in-progress: false
 
 jobs:
@@ -98,10 +100,17 @@ jobs:
           VERSION: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
-          code=$(curl -sS -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/${PKG}/${VERSION}" || echo 000)
+          code=$(curl -sS -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/${PKG}/${VERSION}" || true)
+          code=${code:-000}
           case "$code" in
             404) ;;
-            200) echo "::error::${PKG}@${VERSION} is already published; bump the version"; exit 1 ;;
+            200)
+              # Event-aware like the sibling gates: a tag push can't publish an
+              # existing version, but a manual dispatch is always a dry run.
+              if [ "${{ github.event_name }}" = "push" ]; then
+                echo "::error::${PKG}@${VERSION} is already published; bump the version"; exit 1
+              fi
+              echo "::warning::${PKG}@${VERSION} is already published; a tag here would be refused" ;;
             *) echo "::error::couldn't check npm for ${PKG}@${VERSION} (HTTP ${code}); rerun"; exit 1 ;;
           esac
 
@@ -122,7 +131,12 @@ jobs:
         with:
           name: package
           path: ${{ steps.pack.outputs.tarball }}
+          retention-days: 1
           if-no-files-found: error
+
+      - name: Dry-run publish
+        if: github.event_name == 'workflow_dispatch'
+        run: npm publish "./${{ steps.pack.outputs.tarball }}" --access public --dry-run
 
       - name: Test, typecheck and lint
         run: |
