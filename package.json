@@ -9,7 +9,7 @@
   "bugs": {
     "url": "https://github.com/LuxorLabs/tenki-convex/issues"
   },
-  "version": "0.1.1",
+  "version": "0.1.2",
   "license": "MIT",
   "keywords": [
     "convex",
@@ -105,7 +105,7 @@
   "types": "./dist/client/index.d.ts",
   "module": "./dist/client/index.js",
   "dependencies": {
-    "@tenkicloud/sandbox": "^1.4.1"
+    "@tenkicloud/sandbox": ">=1.4.1"
   },
   "allowScripts": {
     "esbuild": false,
