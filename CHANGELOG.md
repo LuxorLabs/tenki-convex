@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2
+
+- `@tenkicloud/sandbox` is required as `>=1.4.1` instead of `^1.4.1`, so
+  installs get the latest Tenki SDK, new majors included.
+
 ## 0.1.1
 
 - No changes to the component or its runtime dependencies.
