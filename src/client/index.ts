@@ -72,9 +72,9 @@ export interface SandboxClient {
 }
 
 export interface TenkiOptions {
-  /** Defaults to the `TENKI_API_KEY` environment variable. */
+  /** Defaults to `LUXORAI_API_KEY`, then `TENKI_API_KEY`. */
   apiKey?: string;
-  /** Defaults to `TENKI_API_URL`, then https://api.tenki.cloud. */
+  /** Defaults to `LUXORAI_API_URL`, then `TENKI_API_URL`, then https://api.tenki.cloud. */
   baseUrl?: string;
   /**
    * Scopes sandbox identities so deployments sharing a Tenki workspace never
@@ -874,17 +874,21 @@ export class Tenki {
   private client(): SandboxClient {
     if (this.options.client) return this.options.client;
     if (!this.sdk) {
-      const apiKey = this.options.apiKey ?? process.env.TENKI_API_KEY;
+      const apiKey =
+        this.options.apiKey ??
+        (process.env.LUXORAI_API_KEY || process.env.TENKI_API_KEY);
       if (!apiKey) {
         throw new ConvexError({
           code: "unauthenticated",
           message:
-            "TENKI_API_KEY is not set. Run: npx convex env set TENKI_API_KEY tk_...",
+            "LUXORAI_API_KEY (or TENKI_API_KEY) is not set. Run: npx convex env set TENKI_API_KEY tk_...",
         });
       }
       this.sdk = new TenkiSandbox({
         apiKey,
-        baseUrl: this.options.baseUrl ?? process.env.TENKI_API_URL,
+        baseUrl:
+          this.options.baseUrl ??
+          (process.env.LUXORAI_API_URL || process.env.TENKI_API_URL),
       });
     }
     return this.sdk;

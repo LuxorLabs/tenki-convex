@@ -216,6 +216,20 @@ jobs:
           npm stage publish "./${TARBALL}" "$PROVENANCE" --access public --ignore-scripts | tee "$RUNNER_TEMP/stage.out"
           echo "stage_id=$(sed -n 's/.*(staged with id \([0-9a-f-]*\)).*/\1/p' "$RUNNER_TEMP/stage.out")" >> "$GITHUB_OUTPUT"
 
+      # Luxor AI dual publish: the verified tarball renamed to @luxorai/convex,
+      # staged the same way. Off until a human sets the repository variable
+      # LUXORAI_PUBLISH=true after configuring the @luxorai/convex trusted
+      # publisher (this repo, npm-publish.yml, environment npm-publish).
+      - name: Stage @luxorai/convex on npm (trusted publishing)
+        if: vars.LUXORAI_PUBLISH == 'true'
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/luxorai-pkg"
+          mkdir -p "$dir"
+          tar xzf "./${TARBALL}" -C "$dir" --strip-components=1
+          (cd "$dir" && npm pkg set name=@luxorai/convex)
+          npm stage publish "$dir" "$PROVENANCE" --access public --ignore-scripts
+
       - name: Release summary
         if: always()
         env:
