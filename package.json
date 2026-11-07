@@ -93,7 +93,7 @@
     "convex-test": "0.0.62",
     "eslint": "10.13.0",
     "globals": "17.13.0",
-    "jose": "6.2.12",
+    "jose": "6.2.13",
     "prettier": "3.9.10",
     "react": "19.3.1",
     "react-dom": "19.3.1",
