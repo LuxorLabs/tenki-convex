@@ -188,11 +188,19 @@ export function isGone(err: unknown): boolean {
 // recorded at spawn, so a pid reused after a restart is never reported or signaled.
 // Once that pid exits, anything it left in its process group (setsid made the pid
 // the group id, which Linux won't reuse while the group has members) still counts.
-// Nothing counts across a restart: the boot id must match the one recorded at spawn.
+// Nothing counts across a restart: a boot token on tmpfs (kept by pause/resume, unlike
+// the kernel boot_id that restores regenerate) must match the one recorded at spawn.
 const PRELUDE = `home=$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)
 D="\${home:-$HOME}/.tenki-convex/proc/$TENKI_CVX_ID"
 start_of() { sed -n 's/^.*) \\([^Z]\\)/\\1/p' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f20; }
-boot_id() { cat /proc/sys/kernel/random/boot_id 2>/dev/null; }
+boot_id() {
+  f=/dev/shm/.tenki-convex-boot
+  if [ ! -s "$f" ] && t=$(mktemp /dev/shm/.tenki-convex-boot.XXXXXX 2>/dev/null); then
+    cat /proc/sys/kernel/random/uuid > "$t" 2>/dev/null && ln "$t" "$f" 2>/dev/null
+    rm -f "$t"
+  fi
+  cat "$f" 2>/dev/null
+}
 alive() {
   p=$(cat "$D/pid" 2>/dev/null) || return 1
   [ "$(cat "$D/boot" 2>/dev/null)" = "$(boot_id)" ] || return 1

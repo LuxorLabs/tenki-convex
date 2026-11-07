@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Read `LUXORAI_API_KEY` and `LUXORAI_API_URL` before `TENKI_API_KEY` and
+  `TENKI_API_URL`. The `TENKI_*` names keep working; the component name stays
+  `tenki`.
+
 ## 0.1.1
 
 - No changes to the component or its runtime dependencies.
