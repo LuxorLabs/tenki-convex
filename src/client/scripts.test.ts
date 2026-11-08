@@ -1,6 +1,14 @@
 // @vitest-environment node
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "vitest";
@@ -178,6 +186,84 @@ test.skipIf(!isLinux)(
       expect(status(other)).toMatchObject({ state: "running" });
     } finally {
       spawnSync("pkill", ["-f", marker]);
+    }
+  },
+);
+
+test.skipIf(!isLinux)(
+  "only the user's own regular token file counts, and nothing spawns or runs without one",
+  async () => {
+    // A private stand-in for /dev/shm, so planting files there leaves the host's alone.
+    const shm = mkdtempSync(join(tmpdir(), "tenki-cvx-shm-"));
+    const run = (script: string, env: Record<string, string>) => {
+      expect(script).toContain("/dev/shm/");
+      // The timeout fails the test if a planted FIFO blocks the script.
+      return execFileSync(
+        "bash",
+        ["-c", script.replaceAll("/dev/shm/", `${shm}/`)],
+        {
+          env: { PATH: process.env.PATH, ...env },
+          stdio: "pipe",
+          timeout: 5_000,
+        },
+      ).toString();
+    };
+    const status = (id: string) =>
+      parseStatus(
+        run(STATUS_SCRIPT, { TENKI_CVX_ID: id, TENKI_CVX_TAIL: "100" }),
+        100,
+      );
+    const marker = `tenki-cvx-token-${process.pid}`;
+    const spawned: string[] = [];
+    const spawnOne = () => {
+      const id = newProcessId();
+      spawned.push(id);
+      run(SPAWN_SCRIPT, {
+        TENKI_CVX_ID: id,
+        TENKI_CVX_CMD: `exec -a ${marker} sleep 30`,
+      });
+      return id;
+    };
+    const procHome = execFileSync("sh", [
+      "-c",
+      'getent passwd "$(id -u)" | cut -d: -f6',
+    ])
+      .toString()
+      .trim();
+    const uid = execFileSync("id", ["-u"]).toString().trim();
+    const token = join(shm, `.tenki-convex-boot.${uid}`);
+    try {
+      const id = spawnOne();
+      await new Promise((r) => setTimeout(r, 300));
+      expect(status(id)).toMatchObject({ state: "running" });
+
+      // A symlink in the token's place is ignored, even one that reads the right token.
+      const decoy = join(shm, "decoy");
+      renameSync(token, decoy);
+      symlinkSync(decoy, token);
+      expect(status(id)).toMatchObject({ state: "lost" });
+
+      // So is a FIFO, which would block a read.
+      rmSync(token);
+      execFileSync("mkfifo", [token]);
+      expect(status(id)).toMatchObject({ state: "lost" });
+      expect(
+        run(KILL_SCRIPT, { TENKI_CVX_ID: id, TENKI_CVX_SIGNAL: "TERM" }).trim(),
+      ).toBe("gone");
+      expect(spawnOne).toThrow(/no boot token/);
+
+      // A record with an empty boot never matches a missing token.
+      writeFileSync(join(procHome, ".tenki-convex/proc", id, "boot"), "");
+      expect(status(id)).toMatchObject({ state: "lost" });
+    } finally {
+      spawnSync("pkill", ["-f", marker]);
+      rmSync(shm, { recursive: true, force: true });
+      for (const id of spawned) {
+        rmSync(join(procHome, ".tenki-convex/proc", id), {
+          recursive: true,
+          force: true,
+        });
+      }
     }
   },
 );
