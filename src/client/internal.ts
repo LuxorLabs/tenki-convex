@@ -188,19 +188,20 @@ export function isGone(err: unknown): boolean {
 // recorded at spawn, so a pid reused after a restart is never reported or signaled.
 // Once that pid exits, anything it left in its process group (setsid made the pid
 // the group id, which Linux won't reuse while the group has members) still counts.
-// Nothing counts across a restart: a boot token on tmpfs (kept by pause/resume, unlike
-// the kernel boot_id that restores regenerate) must match the one recorded at spawn,
-// and nothing counts without a token. It's world-readable so every user agrees on it.
+// Nothing counts across a restart: a per-user boot token on tmpfs (kept by pause/resume,
+// unlike the kernel boot_id that restores regenerate) must match the one recorded at
+// spawn. Only a regular file the user owns counts, so another user's FIFO or symlink
+// can't hang or spoof it; without a token nothing counts and spawn refuses.
 const PRELUDE = `home=$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)
 D="\${home:-$HOME}/.tenki-convex/proc/$TENKI_CVX_ID"
 start_of() { sed -n 's/^.*) \\([^Z]\\)/\\1/p' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f20; }
 boot_id() {
-  f=/dev/shm/.tenki-convex-boot
-  if [ ! -s "$f" ] && t=$(mktemp /dev/shm/.tenki-convex-boot.XXXXXX 2>/dev/null); then
-    cat /proc/sys/kernel/random/uuid > "$t" 2>/dev/null && chmod 644 "$t" && ln "$t" "$f" 2>/dev/null
+  f=/dev/shm/.tenki-convex-boot.$(id -u)
+  if [ ! -e "$f" ] && t=$(mktemp /dev/shm/.tenki-convex-tmp.XXXXXX 2>/dev/null); then
+    cat /proc/sys/kernel/random/uuid > "$t" 2>/dev/null && ln "$t" "$f" 2>/dev/null
     rm -f "$t"
   fi
-  cat "$f" 2>/dev/null
+  [ -f "$f" ] && [ ! -L "$f" ] && [ -O "$f" ] && cat "$f" 2>/dev/null
 }
 alive() {
   p=$(cat "$D/pid" 2>/dev/null) || return 1
@@ -222,6 +223,8 @@ alive() {
 // starts with default handlers so every signal kill allows reaches it.
 export const SPAWN_SCRIPT = `set -e
 ${PRELUDE}
+b=$(boot_id) || b=
+[ -n "$b" ] || { echo "no boot token in /dev/shm, so the process could not be tracked" >&2; exit 1; }
 mkdir -p "$D"
 export TENKI_CVX_DIR="$D"
 reset=nohup
@@ -230,7 +233,7 @@ setsid $reset bash -c 'cmd=$TENKI_CVX_CMD; dir=$TENKI_CVX_DIR; unset TENKI_CVX_C
 pid=$!
 echo "$pid" > "$D/pid"
 start_of "$pid" > "$D/start" || true
-boot_id > "$D/boot" || true
+echo "$b" > "$D/boot"
 echo "$pid"`;
 
 export const STATUS_SCRIPT = `${PRELUDE}

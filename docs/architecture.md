@@ -155,8 +155,10 @@ exited, any process left in that group (say, a server the command started with
 `&`) keeps the status `running`, and `kill` signals the group. Nothing counts
 across a restart: the spawn records a boot token, and a record from another boot
 is `lost` even if its pid now leads someone else's group. The token is a random
-id the first script to need it writes, world-readable, to
-`/dev/shm/.tenki-convex-boot`. If it can't be read, no process counts as running
+id the user's first script to need it writes to
+`/dev/shm/.tenki-convex-boot.<uid>`. Only a regular file the user owns counts,
+so another user's FIFO or symlink in its place can't block a script or stand in
+for the token. Without a token, `spawn` refuses, no process counts as running
 and `kill` signals nothing. `/dev/shm` is tmpfs, so a restart clears it while
 pause and resume, which restore the VM's memory, keep it. The kernel's own boot
 id can't serve: Tenki regenerates it when it restores a snapshot, so a process
