@@ -139,7 +139,7 @@ to `nohup`, and `INT` and `HUP` have no effect. Each process gets a directory,
 `<home>/.tenki-convex/proc/<processId>/`, holding:
 
 - `pid`, `start` (the process start time read from `/proc/<pid>/stat`) and
-  `boot` (the kernel's boot id)
+  `boot` (the sandbox's boot token, below)
 - `log` (combined stdout and stderr)
 - `exit` (written to a temp file and renamed into place when the command exits,
   so a status check never reads a half-written code)
@@ -153,8 +153,16 @@ start time matches `start`, so after a restart a reused pid is reported as
 Linux doesn't reuse a pid while its group has members, so once the pid has
 exited, any process left in that group (say, a server the command started with
 `&`) keeps the status `running`, and `kill` signals the group. Nothing counts
-across a restart: the spawn records the kernel's boot id, and a record from
-another boot is `lost` even if its pid now leads someone else's group.
+across a restart: the spawn records a boot token, and a record from another boot
+is `lost` even if its pid now leads someone else's group. The token is a random
+id the user's first script to need it writes to
+`/dev/shm/.tenki-convex-boot.<uid>`. Only a regular file the user owns counts,
+so another user's FIFO or symlink in its place can't block a script or stand in
+for the token. Without a token, `spawn` refuses, no process counts as running
+and `kill` signals nothing. `/dev/shm` is tmpfs, so a restart clears it while
+pause and resume, which restore the VM's memory, keep it. The kernel's own boot
+id can't serve: Tenki regenerates it when it restores a snapshot, so a process
+that survived a pause would read as `lost`.
 
 `processStatus` and `kill` are fixed scripts too. User input reaches them only
 through environment variables, never through string interpolation. `processId`s
