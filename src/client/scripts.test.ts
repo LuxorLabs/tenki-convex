@@ -214,8 +214,10 @@ test.skipIf(!isLinux)(
         100,
       );
     const marker = `tenki-cvx-token-${process.pid}`;
+    const spawned: string[] = [];
     const spawnOne = () => {
       const id = newProcessId();
+      spawned.push(id);
       run(SPAWN_SCRIPT, {
         TENKI_CVX_ID: id,
         TENKI_CVX_CMD: `exec -a ${marker} sleep 30`,
@@ -255,6 +257,13 @@ test.skipIf(!isLinux)(
       expect(status(id)).toMatchObject({ state: "lost" });
     } finally {
       spawnSync("pkill", ["-f", marker]);
+      rmSync(shm, { recursive: true, force: true });
+      for (const id of spawned) {
+        rmSync(join(procHome, ".tenki-convex/proc", id), {
+          recursive: true,
+          force: true,
+        });
+      }
     }
   },
 );
