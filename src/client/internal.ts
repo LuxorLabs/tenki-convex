@@ -189,21 +189,23 @@ export function isGone(err: unknown): boolean {
 // Once that pid exits, anything it left in its process group (setsid made the pid
 // the group id, which Linux won't reuse while the group has members) still counts.
 // Nothing counts across a restart: a boot token on tmpfs (kept by pause/resume, unlike
-// the kernel boot_id that restores regenerate) must match the one recorded at spawn.
+// the kernel boot_id that restores regenerate) must match the one recorded at spawn,
+// and nothing counts without a token. It's world-readable so every user agrees on it.
 const PRELUDE = `home=$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)
 D="\${home:-$HOME}/.tenki-convex/proc/$TENKI_CVX_ID"
 start_of() { sed -n 's/^.*) \\([^Z]\\)/\\1/p' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f20; }
 boot_id() {
   f=/dev/shm/.tenki-convex-boot
   if [ ! -s "$f" ] && t=$(mktemp /dev/shm/.tenki-convex-boot.XXXXXX 2>/dev/null); then
-    cat /proc/sys/kernel/random/uuid > "$t" 2>/dev/null && ln "$t" "$f" 2>/dev/null
+    cat /proc/sys/kernel/random/uuid > "$t" 2>/dev/null && chmod 644 "$t" && ln "$t" "$f" 2>/dev/null
     rm -f "$t"
   fi
   cat "$f" 2>/dev/null
 }
 alive() {
   p=$(cat "$D/pid" 2>/dev/null) || return 1
-  [ "$(cat "$D/boot" 2>/dev/null)" = "$(boot_id)" ] || return 1
+  b=$(boot_id)
+  [ -n "$b" ] && [ "$(cat "$D/boot" 2>/dev/null)" = "$b" ] || return 1
   s=$(start_of "$p")
   if [ -n "$s" ]; then [ "$s" = "$(cat "$D/start" 2>/dev/null)" ]; return; fi
   for f in /proc/[0-9]*/stat; do

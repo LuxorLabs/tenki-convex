@@ -1,6 +1,12 @@
 // @vitest-environment node
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "vitest";
@@ -176,6 +182,57 @@ test.skipIf(!isLinux)(
         }).trim(),
       ).toBe("gone");
       expect(status(other)).toMatchObject({ state: "running" });
+    } finally {
+      spawnSync("pkill", ["-f", marker]);
+    }
+  },
+);
+
+test.skipIf(!isLinux)(
+  "the boot token is world-readable, and nothing counts as running without one",
+  async () => {
+    // A private stand-in for /dev/shm, so emptying the token leaves the host's alone.
+    const shm = mkdtempSync(join(tmpdir(), "tenki-cvx-shm-"));
+    const run = (script: string, env: Record<string, string>) => {
+      expect(script).toContain("/dev/shm/");
+      return execFileSync(
+        "bash",
+        ["-c", script.replaceAll("/dev/shm/", `${shm}/`)],
+        { env: { PATH: process.env.PATH, ...env } },
+      ).toString();
+    };
+    const status = (id: string) =>
+      parseStatus(
+        run(STATUS_SCRIPT, { TENKI_CVX_ID: id, TENKI_CVX_TAIL: "100" }),
+        100,
+      );
+    const marker = `tenki-cvx-token-${process.pid}`;
+    const spawnOne = () => {
+      const id = newProcessId();
+      run(SPAWN_SCRIPT, {
+        TENKI_CVX_ID: id,
+        TENKI_CVX_CMD: `exec -a ${marker} sleep 30`,
+      });
+      return id;
+    };
+    const token = join(shm, ".tenki-convex-boot");
+    try {
+      const first = spawnOne();
+      await new Promise((r) => setTimeout(r, 300));
+      expect(status(first)).toMatchObject({ state: "running" });
+      expect(statSync(token).mode & 0o777).toBe(0o644);
+
+      // Spawned while the token reads empty, so its record is empty too.
+      writeFileSync(token, "");
+      const second = spawnOne();
+      await new Promise((r) => setTimeout(r, 300));
+      expect(status(second)).toMatchObject({ state: "lost" });
+      expect(
+        run(KILL_SCRIPT, {
+          TENKI_CVX_ID: second,
+          TENKI_CVX_SIGNAL: "TERM",
+        }).trim(),
+      ).toBe("gone");
     } finally {
       spawnSync("pkill", ["-f", marker]);
     }
