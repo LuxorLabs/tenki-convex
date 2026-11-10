@@ -221,19 +221,26 @@ jobs:
       # LUXORAI_PUBLISH=true after configuring the @luxorai/convex trusted
       # publisher (this repo, npm-publish.yml, environment npm-publish).
       - name: Stage @luxorai/convex on npm (trusted publishing)
+        id: stage_luxorai
         if: vars.LUXORAI_PUBLISH == 'true'
         run: |
           set -euo pipefail
+          if npm view "@luxorai/convex@${VERSION}" version >/dev/null 2>&1; then
+            echo "@luxorai/convex@${VERSION} is already on npm, skipping"
+            exit 0
+          fi
           dir="$RUNNER_TEMP/luxorai-pkg"
           mkdir -p "$dir"
           tar xzf "./${TARBALL}" -C "$dir" --strip-components=1
           (cd "$dir" && npm pkg set name=@luxorai/convex)
-          npm stage publish "$dir" "$PROVENANCE" --access public --ignore-scripts
+          npm stage publish "$dir" "$PROVENANCE" --access public --ignore-scripts | tee "$RUNNER_TEMP/stage-luxorai.out"
+          echo "stage_id=$(sed -n 's/.*(staged with id \([0-9a-f-]*\)).*/\1/p' "$RUNNER_TEMP/stage-luxorai.out")" >> "$GITHUB_OUTPUT"
 
       - name: Release summary
         if: always()
         env:
           STAGE_ID: ${{ steps.stage.outputs.stage_id }}
+          LUXORAI_STAGE_ID: ${{ steps.stage_luxorai.outputs.stage_id }}
         run: |
           {
             echo "### @tenkicloud/convex ${VERSION}"
@@ -250,5 +257,11 @@ jobs:
             elif [ "${{ steps.stage.outcome }}" = "success" ]; then
               echo ""
               echo "Not live yet. Find the stage id with \`npm stage list ${PKG}\` and approve it with 2FA."
+            fi
+            if [ -n "${LUXORAI_STAGE_ID}" ]; then
+              echo ""
+              echo "### @luxorai/convex ${VERSION}"
+              echo ""
+              echo "Staged too. Approve it with \`npm stage approve ${LUXORAI_STAGE_ID}\` or reject it with \`npm stage reject ${LUXORAI_STAGE_ID}\`."
             fi
           } >> "$GITHUB_STEP_SUMMARY"

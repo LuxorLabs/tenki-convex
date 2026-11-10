@@ -23,8 +23,8 @@ npx convex env set TENKI_API_KEY tk_...
 ```
 
 Create the API key in the Tenki dashboard. `LUXORAI_API_KEY` and
-`LUXORAI_API_URL` are read before `TENKI_API_KEY` and `TENKI_API_URL` when set.
-Then add the component to your app:
+`LUXORAI_API_URL` are read before `TENKI_API_KEY` and `TENKI_API_URL` when
+non-empty. Then add the component to your app:
 
 ```ts
 // convex/convex.config.ts
