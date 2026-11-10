@@ -1,10 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
-- Read `LUXORAI_API_KEY` and `LUXORAI_API_URL` before `TENKI_API_KEY` and
+- Reads `LUXORAI_API_KEY` and `LUXORAI_API_URL` before `TENKI_API_KEY` and
   `TENKI_API_URL`. The `TENKI_*` names keep working; the component name stays
   `tenki`.
+- Also published as `@luxorai/convex`, the same package under the Luxor AI name.
+- Background processes stay alive and killable after a sandbox is paused and
+  resumed.
+- Requires `@tenkicloud/sandbox` 1.4.3 or later.
 
 ## 0.1.1
 
