@@ -88,6 +88,11 @@
       "description": "Each Tenki SDK release gets its own PR; the e2e suite runs against it and a human merges it.",
       "matchPackageNames": ["@tenkicloud/sandbox"],
       "addLabels": ["tenki-sdk"]
+    },
+    {
+      "description": "Our own first-party SDK, so it skips the release-age window; matches min-release-age-exclude in .npmrc.",
+      "matchPackageNames": ["@tenkicloud/sandbox"],
+      "minimumReleaseAge": null
     }
   ]
 }

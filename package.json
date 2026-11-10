@@ -105,7 +105,7 @@
   "types": "./dist/client/index.d.ts",
   "module": "./dist/client/index.js",
   "dependencies": {
-    "@tenkicloud/sandbox": "^1.4.1"
+    "@tenkicloud/sandbox": "^1.4.3"
   },
   "allowScripts": {
     "esbuild": false,
