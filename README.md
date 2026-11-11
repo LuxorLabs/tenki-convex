@@ -1,10 +1,11 @@
-# Tenki Sandboxes for Convex
+# @luxorai/convex
 
-Give every user or agent in your Convex app its own cloud machine.
-[Tenki](https://tenki.cloud) sandboxes are microVMs that boot in about a second.
-This component runs them from your Convex actions and keeps each sandbox's state
-in a Convex table, so your UI updates live as a sandbox goes from `provisioning`
-to `ready` to `paused`.
+Luxor Sandbox for Convex: give every user or agent in your Convex app its own
+cloud machine. [Luxor Sandbox](https://luxor.ai), part of Luxor Agent Cloud from
+Luxor AI, runs microVMs that boot in about a second. This component runs them
+from your Convex actions and keeps each sandbox's state in a Convex table, so
+your UI updates live as a sandbox goes from `provisioning` to `ready` to
+`paused`.
 
 - **One sandbox per identity.** Sandboxes are keyed by `(ownerId, key)`.
   `create` is safe to retry and to call concurrently: every call ends up with
@@ -18,18 +19,23 @@ to `ready` to `paused`.
 ## Install
 
 ```sh
-npm install @tenkicloud/convex
-npx convex env set TENKI_API_KEY tk_...
+npm install @luxorai/convex
+npx convex env set LUXORAI_API_KEY lx_...
 ```
 
-Create the API key in the Tenki dashboard. `LUXORAI_API_KEY` and
-`LUXORAI_API_URL` are read before `TENKI_API_KEY` and `TENKI_API_URL` when
-non-empty. Then add the component to your app:
+Create the API key in the Luxor dashboard. Keys start with `lx_` (`tk_` keys
+still work). `LUXORAI_API_URL` sets the API host, for example
+`https://api.luxor.ai`. The old `TENKI_API_KEY` and `TENKI_API_URL` names are
+still accepted, and are read when the `LUXORAI_*` ones are empty.
+
+The old `@tenkicloud/convex` name keeps working and publishes the same code.
+
+Then add the component to your app:
 
 ```ts
 // convex/convex.config.ts
 import { defineApp } from "convex/server";
-import tenki from "@tenkicloud/convex/convex.config.js";
+import tenki from "@luxorai/convex/convex.config.js";
 
 const app = defineApp();
 app.use(tenki);
@@ -39,15 +45,15 @@ export default app;
 
 ## Usage
 
-The Tenki SDK needs Node.js, so create and call `Tenki` from a `"use node"`
-file:
+The Luxor Sandbox SDK needs Node.js, so create and call `Tenki` from a
+`"use node"` file:
 
 ```ts
 // convex/sandboxes.ts
 "use node";
 import { getAuthUserId } from "@convex-dev/auth/server";
 import { v } from "convex/values";
-import { Tenki } from "@tenkicloud/convex";
+import { Tenki } from "@luxorai/convex";
 import { action, type ActionCtx } from "./_generated/server";
 import { components } from "./_generated/api";
 
@@ -115,14 +121,14 @@ Every method takes the action `ctx` and the sandbox's `{ ownerId, key }`.
 ### Lifecycle
 
 - `create({ options?, resume? })` returns the sandbox, creating it if needed. A
-  paused sandbox, including one Tenki paused at its deadline, is resumed first;
+  paused sandbox, including one Luxor paused at its deadline, is resumed first;
   pass `resume: false` to get it as it is. If a concurrent call for the same
   identity fails, this one throws the same error. `options` takes any
-  `@tenkicloud/sandbox` create option: resources, image, template, env,
+  `@luxorai/sandbox` create option: resources, image, template, env,
   `allowDomains`, `maxDurationMs`, `snapshotId`, ... With `snapshotId`, the size
   comes from the snapshot and the `defaults` for image, template and resources
-  are skipped. Tags must be valid Tenki tags (`[a-z0-9][a-z0-9_:.-]*`), and the
-  `cvx:` prefix is reserved.
+  are skipped. Tags must be valid Luxor Sandbox tags (`[a-z0-9][a-z0-9_:.-]*`),
+  and the `cvx:` prefix is reserved.
 - `pause({ wait? })` keeps memory and disk, so processes resume where they left
   off. It takes tens of seconds; with `wait: false` it returns `pausing` and a
   later `refresh` sees `paused`.
@@ -131,13 +137,13 @@ Every method takes the action `ctx` and the sandbox's `{ ownerId, key }`.
 - `extend({ additionalMs })` pushes the deadline out.
 - `snapshot({ name?, expiresAt? })` captures the sandbox; `listSnapshots()`
   lists them. A snapshot without `expiresAt` is kept until you delete it in
-  Tenki.
+  Luxor.
 - `fork({ ownerId, from, to })` snapshots `from` and creates `to` from it. The
   two then run independently. It throws `already_exists` while `to` is live or
   being created, and checks `maxActiveSandboxes`, before taking the snapshot.
-  The fork's snapshot expires after an hour, and Tenki deletes it once no
+  The fork's snapshot expires after an hour, and Luxor deletes it once no
   sandbox uses it.
-- `refresh()` re-reads the sandbox from Tenki.
+- `refresh()` re-reads the sandbox from Luxor.
 - `destroy()` terminates it, and a `create` still in flight for it fails with
   `terminated`. The key can then be reused.
 - `reconcile({ limit? })` refreshes the least recently updated live sandboxes
@@ -186,19 +192,19 @@ Errors are `ConvexError`s with a `code`:
 | `already_exists`                                         | `fork`'s target is live.                                                      |
 | `not_ready`                                              | The row's `phase` doesn't allow the call; `phase` is included.                |
 | `terminated`                                             | The sandbox is gone; the row is now `terminated`.                             |
-| `invalid_state`                                          | Tenki refused the call in the sandbox's current state; the row was re-synced. |
-| `insufficient_credits`                                   | The Tenki workspace's balance is empty.                                       |
+| `invalid_state`                                          | Luxor refused the call in the sandbox's current state; the row was re-synced. |
+| `insufficient_credits`                                   | The Luxor workspace's balance is empty.                                       |
 | `capacity_exceeded`                                      | `maxActiveSandboxes` is reached; try again later.                             |
-| `invalid_argument`                                       | Tenki rejected an option, e.g. a malformed tag.                               |
+| `invalid_argument`                                       | Luxor rejected an option, e.g. a malformed tag.                               |
 | `snapshot_not_found`                                     | `snapshotId` doesn't exist.                                                   |
 | `file_too_large`                                         | `readFile` on a file over `maxBytes`; `size` is included.                     |
 | `spawn_failed`                                           | `spawn` couldn't start the command.                                           |
-| `unavailable`, `timeout`                                 | Tenki was briefly unavailable or a wait ran out; retry.                       |
-| `pause_failed`, `resume_failed`                          | Tenki couldn't pause or resume; the row was re-synced from Tenki.             |
+| `unavailable`, `timeout`                                 | Luxor was briefly unavailable or a wait ran out; retry.                       |
+| `pause_failed`, `resume_failed`                          | Luxor couldn't pause or resume; the row was re-synced from Luxor.             |
 | `provisioning_timeout`                                   | A concurrent `create` of the same identity is still provisioning.             |
 | `file_not_found`                                         | `readFile` on a missing path.                                                 |
-| `unauthenticated`                                        | `TENKI_API_KEY` is missing or invalid.                                        |
-| `quota_exceeded`, `rate_limited`, `capacity_unavailable` | Tenki limits; retry later.                                                    |
+| `unauthenticated`                                        | `LUXORAI_API_KEY` (or `TENKI_API_KEY`) is missing or invalid.                 |
+| `quota_exceeded`, `rate_limited`, `capacity_unavailable` | Luxor limits; retry later.                                                    |
 
 A failed `create` also records the error on the row (`phase: "error"` and
 `lastError`), and the next `create` retries.
@@ -212,9 +218,9 @@ so concurrent creates, forks and resumes can't exceed it.
 
 ## Lifetime
 
-A Tenki sandbox runs for at most `maxDurationMs` at a time, set at create time;
+A Luxor sandbox runs for at most `maxDurationMs` at a time, set at create time;
 your workspace's limits set the default and the maximum. Activity does not
-extend it; call `extend`. At the deadline Tenki pauses the sandbox and keeps it
+extend it; call `extend`. At the deadline Luxor pauses the sandbox and keeps it
 for the pause retention (7 days unless you set `pauseRetentionMs`), then deletes
 it. The row keeps its last known phase until `refresh`, `reconcile` or the next
 `create` catches it up. `create` resumes a paused sandbox, and resuming one that

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1
+
+- Package page now shows Luxor names, install commands and docs links.
+
 ## 0.2.0
 
 - Reads `LUXORAI_API_KEY` and `LUXORAI_API_URL` before `TENKI_API_KEY` and
