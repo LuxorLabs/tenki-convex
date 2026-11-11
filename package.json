@@ -1,21 +1,23 @@
 {
   "name": "@tenkicloud/convex",
-  "description": "Tenki Sandboxes for Convex: cloud sandboxes for AI agents, with live state in your Convex tables.",
+  "description": "Luxor Sandbox for Convex: cloud sandboxes for AI agents from Luxor Agent Cloud, with live state in your Convex tables.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/LuxorLabs/tenki-convex.git"
   },
-  "homepage": "https://github.com/LuxorLabs/tenki-convex#readme",
+  "homepage": "https://luxor.ai",
   "bugs": {
     "url": "https://github.com/LuxorLabs/tenki-convex/issues"
   },
-  "version": "0.2.0",
+  "version": "0.2.1",
   "license": "MIT",
   "keywords": [
     "convex",
     "convex-component",
     "component",
-    "tenki",
+    "luxor",
+    "luxorai",
+    "luxor-agent-cloud",
     "sandbox",
     "microvm",
     "ai-agents"

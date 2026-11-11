@@ -881,7 +881,7 @@ export class Tenki {
         throw new ConvexError({
           code: "unauthenticated",
           message:
-            "LUXORAI_API_KEY (or TENKI_API_KEY) is not set. Run: npx convex env set TENKI_API_KEY tk_...",
+            "LUXORAI_API_KEY (or TENKI_API_KEY) is not set. Run: npx convex env set LUXORAI_API_KEY lx_...",
         });
       }
       this.sdk = new TenkiSandbox({
