@@ -123,12 +123,13 @@ Every method takes the action `ctx` and the sandbox's `{ ownerId, key }`.
 - `create({ options?, resume? })` returns the sandbox, creating it if needed. A
   paused sandbox, including one Luxor paused at its deadline, is resumed first;
   pass `resume: false` to get it as it is. If a concurrent call for the same
-  identity fails, this one throws the same error. `options` takes any
-  `@luxorai/sandbox` create option: resources, image, template, env,
-  `allowDomains`, `maxDurationMs`, `snapshotId`, ... With `snapshotId`, the size
-  comes from the snapshot and the `defaults` for image, template and resources
-  are skipped. Tags must be valid Luxor Sandbox tags (`[a-z0-9][a-z0-9_:.-]*`),
-  and the `cvx:` prefix is reserved.
+  identity fails, this one throws the same error. `options` takes any Luxor
+  Sandbox SDK create option (`@luxorai/sandbox`, also published as
+  `@tenkicloud/sandbox`, which this component depends on): resources, image,
+  template, env, `allowDomains`, `maxDurationMs`, `snapshotId`, ... With
+  `snapshotId`, the size comes from the snapshot and the `defaults` for image,
+  template and resources are skipped. Tags must be valid Luxor Sandbox tags
+  (`[a-z0-9][a-z0-9_:.-]*`), and the `cvx:` prefix is reserved.
 - `pause({ wait? })` keeps memory and disk, so processes resume where they left
   off. It takes tens of seconds; with `wait: false` it returns `pausing` and a
   later `refresh` sees `paused`.
