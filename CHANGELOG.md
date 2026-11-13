@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.2
+
+- Pin development and publishing to Node.js 24.22.3.
+- Reject Git dependencies during installation so they cannot bypass the
+  registry release-age window or run their own prepare scripts.
+
 ## 0.2.1
 
 - Package page now shows Luxor names, install commands and docs links.
