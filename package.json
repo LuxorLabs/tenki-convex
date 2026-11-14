@@ -82,7 +82,7 @@
   "devDependencies": {
     "@auth/core": "0.41.3",
     "@convex-dev/auth": "0.0.96",
-    "@convex-dev/eslint-plugin": "5.0.0",
+    "@convex-dev/eslint-plugin": "5.0.1",
     "@edge-runtime/vm": "5.0.0",
     "@eslint/js": "10.0.1",
     "@types/node": "24.19.2",
@@ -95,7 +95,7 @@
     "convex-test": "0.0.65",
     "eslint": "10.13.0",
     "globals": "17.13.0",
-    "jose": "6.2.13",
+    "jose": "6.2.14",
     "prettier": "3.9.10",
     "react": "19.3.1",
     "react-dom": "19.3.1",
