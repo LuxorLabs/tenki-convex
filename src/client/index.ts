@@ -72,9 +72,9 @@ export interface SandboxClient {
 }
 
 export interface TenkiOptions {
-  /** Defaults to `LUXORAI_API_KEY`, then `TENKI_API_KEY`. */
+  /** Defaults to `LUXOR_API_KEY`, then `TENKI_API_KEY`. */
   apiKey?: string;
-  /** Defaults to `LUXORAI_API_URL`, then `TENKI_API_URL`, then https://api.tenki.cloud. */
+  /** Defaults to `LUXOR_API_URL`, then `TENKI_API_URL`, then https://api.tenki.cloud. */
   baseUrl?: string;
   /**
    * Scopes sandbox identities so deployments sharing a Tenki workspace never
@@ -875,20 +875,19 @@ export class Tenki {
     if (this.options.client) return this.options.client;
     if (!this.sdk) {
       const apiKey =
-        this.options.apiKey ??
-        (process.env.LUXORAI_API_KEY || process.env.TENKI_API_KEY);
+        this.options.apiKey ?? (envApiKey() || process.env.TENKI_API_KEY);
       if (!apiKey) {
         throw new ConvexError({
           code: "unauthenticated",
           message:
-            "LUXORAI_API_KEY (or TENKI_API_KEY) is not set. Run: npx convex env set LUXORAI_API_KEY lx_...",
+            "LUXOR_API_KEY (or TENKI_API_KEY) is not set. Run: npx convex env set LUXOR_API_KEY lx_...",
         });
       }
       this.sdk = new TenkiSandbox({
         apiKey,
         baseUrl:
           this.options.baseUrl ??
-          (process.env.LUXORAI_API_URL || process.env.TENKI_API_URL),
+          (process.env.LUXOR_API_URL || process.env.TENKI_API_URL),
       });
     }
     return this.sdk;
@@ -1086,4 +1085,10 @@ function cacheSession(session: SandboxSession) {
 function toConvexError(err: unknown): Error {
   if (err instanceof ConvexError) return err;
   return new ConvexError(describeError(err));
+}
+
+// LUXOR_API_KEY is also the Luxor Mining Pool key name, so only lx_/tk_ values count.
+function envApiKey(): string | undefined {
+  const value = process.env.LUXOR_API_KEY?.trim();
+  return value && /^(lx|tk)_/.test(value) ? value : undefined;
 }

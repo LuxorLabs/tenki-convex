@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.3
+
+- Environment variables now use the `LUXOR_` prefix (for example
+  `LUXOR_API_KEY`). `LUXORAI_*` variables are no longer read; `TENKI_*` still
+  works as a fallback. `LUXOR_API_KEY` is only used when it starts with `lx_` or
+  `tk_`.
+- Requires `@tenkicloud/sandbox` 1.5.3 or later, the first SDK version that
+  reads `LUXOR_*`.
+
 ## 0.2.2
 
 - Pin development and publishing to Node.js 24.22.3.

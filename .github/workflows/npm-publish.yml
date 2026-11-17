@@ -240,7 +240,7 @@ jobs:
         if: always()
         env:
           STAGE_ID: ${{ steps.stage.outputs.stage_id }}
-          LUXORAI_STAGE_ID: ${{ steps.stage_luxorai.outputs.stage_id }}
+          LUXOR_SCOPE_STAGE_ID: ${{ steps.stage_luxorai.outputs.stage_id }}
         run: |
           {
             echo "### @tenkicloud/convex ${VERSION}"
@@ -258,10 +258,10 @@ jobs:
               echo ""
               echo "Not live yet. Find the stage id with \`npm stage list ${PKG}\` and approve it with 2FA."
             fi
-            if [ -n "${LUXORAI_STAGE_ID}" ]; then
+            if [ -n "${LUXOR_SCOPE_STAGE_ID}" ]; then
               echo ""
               echo "### @luxorai/convex ${VERSION}"
               echo ""
-              echo "Staged too. Approve it with \`npm stage approve ${LUXORAI_STAGE_ID}\` or reject it with \`npm stage reject ${LUXORAI_STAGE_ID}\`."
+              echo "Staged too. Approve it with \`npm stage approve ${LUXOR_SCOPE_STAGE_ID}\` or reject it with \`npm stage reject ${LUXOR_SCOPE_STAGE_ID}\`."
             fi
           } >> "$GITHUB_STEP_SUMMARY"

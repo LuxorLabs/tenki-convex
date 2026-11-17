@@ -20,13 +20,14 @@ your UI updates live as a sandbox goes from `provisioning` to `ready` to
 
 ```sh
 npm install @luxorai/convex
-npx convex env set LUXORAI_API_KEY lx_...
+npx convex env set LUXOR_API_KEY lx_...
 ```
 
 Create the API key in the Luxor dashboard. Keys start with `lx_` (`tk_` keys
-still work). `LUXORAI_API_URL` sets the API host, for example
+still work). `LUXOR_API_URL` sets the API host, for example
 `https://api.luxor.ai`. The old `TENKI_API_KEY` and `TENKI_API_URL` names are
-still accepted, and are read when the `LUXORAI_*` ones are empty.
+still accepted, and are read when the `LUXOR_*` ones are empty. `LUXOR_API_KEY`
+is only used when it starts with `lx_` or `tk_`; any other value is ignored.
 
 The old `@tenkicloud/convex` name keeps working and publishes the same code.
 
@@ -204,7 +205,7 @@ Errors are `ConvexError`s with a `code`:
 | `pause_failed`, `resume_failed`                          | Luxor couldn't pause or resume; the row was re-synced from Luxor.             |
 | `provisioning_timeout`                                   | A concurrent `create` of the same identity is still provisioning.             |
 | `file_not_found`                                         | `readFile` on a missing path.                                                 |
-| `unauthenticated`                                        | `LUXORAI_API_KEY` (or `TENKI_API_KEY`) is missing or invalid.                 |
+| `unauthenticated`                                        | `LUXOR_API_KEY` (or `TENKI_API_KEY`) is missing or invalid.                   |
 | `quota_exceeded`, `rate_limited`, `capacity_unavailable` | Luxor limits; retry later.                                                    |
 
 A failed `create` also records the error on the row (`phase: "error"` and
