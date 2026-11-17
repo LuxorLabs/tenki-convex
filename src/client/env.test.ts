@@ -86,7 +86,7 @@ describe("SDK credentials from env", () => {
     (key) => {
       vi.stubEnv("LUXOR_API_KEY", key);
       vi.stubEnv("TENKI_API_KEY", "tk_legacy");
-      expect(sdkOptions()).toEqual({ apiKey: key, baseUrl: undefined });
+      expect(sdkOptions()).toEqual({ apiKey: key.trim(), baseUrl: undefined });
     },
   );
 

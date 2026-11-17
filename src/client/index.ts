@@ -1089,6 +1089,6 @@ function toConvexError(err: unknown): Error {
 
 // LUXOR_API_KEY is also the Luxor Mining Pool key name, so only lx_/tk_ values count.
 function envApiKey(): string | undefined {
-  const value = process.env.LUXOR_API_KEY;
-  return value && /^(lx|tk)_/.test(value.trim()) ? value : undefined;
+  const value = process.env.LUXOR_API_KEY?.trim();
+  return value && /^(lx|tk)_/.test(value) ? value : undefined;
 }
