@@ -65,7 +65,7 @@
       ]
     },
     {
-      "description": "vite and its plugins move together; @vitejs/plugin-react 6 requires vite ^8.",
+      "description": "vite and any @vitejs/* plugin must move together, so a plugin never lands against a vite it does not support.",
       "groupName": "vite",
       "matchPackageNames": ["vite", "@vitejs/**"]
     },
