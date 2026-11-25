@@ -1,7 +1,8 @@
 import { defineConfig } from "vite";
-import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   envDir: "../",
-  plugins: [react()],
+  // Vite transforms TSX with the automatic JSX runtime on its own; the react
+  // plugin was only adding Fast Refresh, which a demo page does not need.
+  esbuild: { jsx: "automatic" },
 });
