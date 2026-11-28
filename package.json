@@ -81,7 +81,7 @@
   },
   "devDependencies": {
     "@auth/core": "0.41.3",
-    "@convex-dev/auth": "0.0.96",
+    "@convex-dev/auth": "0.0.98",
     "@convex-dev/eslint-plugin": "5.0.1",
     "@edge-runtime/vm": "5.0.0",
     "@eslint/js": "10.0.1",
